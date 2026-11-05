@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import QRCode from 'qrcode';
 import { formatSalonDistance, readStoredLocationFix, shouldAcceptLocationFix, storeLocationFix } from './location.js';
 
-const API_BASE = import.meta.env.VITE_API_BASE_URL || '';
+const API_BASE = import.meta.env.VITE_API_BASE_URL || (import.meta.env.PROD ? 'https://salon-g34s.onrender.com' : '');
 const money = (value) => `₹${Number(value || 0).toLocaleString('en-IN')}`;
 const getLocalDateString = (date = new Date()) => {
   const year = date.getFullYear();
