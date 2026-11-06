@@ -20,6 +20,7 @@ const Booking = require('../models/booking');
 const Salon = require('../models/salon');
 const { createUpiPaymentDetails, getUpiAdvanceAmount } = require('../utils/upiPayment');
 const {
+  cancelMyBooking,
   getBookingHistory,
   submitRejectionFeedback,
   updateQueueBooking,
@@ -156,6 +157,7 @@ test('salon owners can reject a waiting booking with a saved reason without chan
     paymentAmount: 1,
     paymentStatus: 'paid',
   });
+
   Booking.findOneAndUpdate = async (_filter, update) => {
     bookingUpdate = update;
     return {
@@ -200,6 +202,54 @@ test('salon owners can reject a waiting booking with a saved reason without chan
     Salon.findOne = originalSalonFindOne;
     User.findById = originalUserFindById;
     User.updateOne = originalUserUpdateOne;
+  }
+});
+
+test('cancelling a paid advance does not restore credits', async () => {
+  const originals = {
+    findOne: Booking.findOne,
+    findOneAndUpdate: Booking.findOneAndUpdate,
+    find: Booking.find,
+    userUpdateOne: User.updateOne,
+  };
+  let slotUpdate;
+  const booking = {
+    _id: 'booking-1',
+    userId: 'customer-1',
+    salonId: 'salon-1',
+    status: 'waiting',
+    paymentStatus: 'paid',
+    paymentMode: 'token',
+    paymentAmount: 25,
+    walletCreditUsed: 7,
+  };
+  Booking.findOne = async () => booking;
+  Booking.findOneAndUpdate = async () => ({ ...booking, status: 'cancelled' });
+  Booking.find = () => ({
+    populate() { return this; },
+    lean: async () => [],
+  });
+  User.updateOne = async (_query, update) => { slotUpdate = update; };
+
+  try {
+    const response = {
+      statusCode: 200,
+      json(body) { this.body = body; return this; },
+    };
+    await cancelMyBooking({
+      params: { id: 'booking-1' },
+      user: { id: 'customer-1' },
+    }, response, (error) => { throw error; });
+
+    assert.equal(slotUpdate.$inc.walletCredits, 0);
+    assert.equal(response.body.walletCreditAdded, 0);
+    assert.equal(response.body.walletCreditReturned, 0);
+    assert.match(response.body.message, /advance payment is non-refundable/);
+  } finally {
+    Booking.findOne = originals.findOne;
+    Booking.findOneAndUpdate = originals.findOneAndUpdate;
+    Booking.find = originals.find;
+    User.updateOne = originals.userUpdateOne;
   }
 });
 
