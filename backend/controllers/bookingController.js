@@ -252,10 +252,20 @@ const verifyBookingPayment = async (req, res, next) => {
 
 const getUserBookings = async (req, res, next) => {
   try {
-    const bookings = await Booking.find({ userId: req.user.id })
+    const paginated = req.query.page !== undefined || req.query.limit !== undefined;
+    const page = Math.max(1, Number.parseInt(req.query.page, 10) || 1);
+    const limit = paginated
+      ? Math.min(50, Math.max(1, Number.parseInt(req.query.limit, 10) || 10))
+      : 50;
+    let bookingsQuery = Booking.find({ userId: req.user.id })
       .populate('salonId', 'name address city phone')
       .sort({ createdAt: -1 })
-      .limit(50);
+      .limit(limit);
+    if (paginated) bookingsQuery = bookingsQuery.skip((page - 1) * limit);
+    const [bookings, total] = await Promise.all([
+      bookingsQuery,
+      Booking.countDocuments({ userId: req.user.id }),
+    ]);
     const currentBookings = await Promise.all(bookings.map(async (booking) => {
       if (
         booking.paymentMethod !== 'upi_manual' ||
@@ -315,7 +325,13 @@ const getUserBookings = async (req, res, next) => {
         } : {}),
       };
     });
-    return res.json({ success: true, bookings: result });
+    return res.json({
+      success: true,
+      bookings: result,
+      page,
+      pages: Math.max(1, Math.ceil(total / limit)),
+      total,
+    });
   } catch (error) {
     return next(error);
   }
@@ -681,31 +697,21 @@ const cancelMyBooking = async (req, res, next) => {
       });
     }
 
-    const shouldCredit = booking.status === 'waiting' &&
-      booking.paymentStatus === 'paid' &&
-      booking.paymentMode === 'token' &&
-      booking.estimatedWaitMinutes >= 15;
     const cancelled = await Booking.findOneAndUpdate(
       { _id: booking._id, userId: req.user.id, status: booking.status },
       { $set: { status: 'cancelled', cancelledAt: new Date() } },
       { new: true, runValidators: true }
     );
     if (!cancelled) return res.status(409).json({ success: false, message: 'Booking status changed. Refresh and try again.' });
-    const cancellationCreditLimit = cancelled.paymentAmount;
-    const newCancellationCredit = shouldCredit
-      ? Math.max(0, cancellationCreditLimit - cancelled.walletCreditUsed)
-      : 0;
-    const creditToRestore = cancelled.walletCreditUsed + newCancellationCredit;
+    const creditToRestore = booking.paymentStatus === 'paid' ? 0 : cancelled.walletCreditUsed;
     await releaseBookingSlot(req.user.id, creditToRestore);
     const queue = await refreshWaitEstimates(booking.salonId);
     return res.json({
       success: true,
       message: booking.paymentStatus !== 'paid'
         ? 'Pending payment cancelled and reserved credits returned.'
-        : shouldCredit
-        ? `Booking cancelled. ${newCancellationCredit ? `₹${newCancellationCredit} has been added to your credit balance.` : 'Your used SalonFlow credit has been restored.'}`
-        : 'Booking cancelled. The advance is not eligible for credit under the current cancellation policy.',
-      walletCreditAdded: newCancellationCredit,
+        : 'Booking cancelled. The advance payment is non-refundable.',
+      walletCreditAdded: 0,
       walletCreditReturned: creditToRestore,
       queue,
     });
