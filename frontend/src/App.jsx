@@ -4,6 +4,26 @@ import { formatSalonDistance, readStoredLocationFix, shouldAcceptLocationFix, st
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || (import.meta.env.PROD ? 'https://salon-g34s.onrender.com' : '');
 const money = (value) => `₹${Number(value || 0).toLocaleString('en-IN')}`;
+const bookingStatusLabel = (status) => {
+  const labels = {
+    pending_payment: 'Booking: pending',
+    waiting: 'Booking: waiting',
+    in_service: 'Service: in progress',
+    completed: 'Service: completed',
+    cancelled: 'Booking: cancelled',
+    rejected: 'Booking: rejected',
+  };
+  return labels[status] || `Booking: ${String(status || 'unknown').replaceAll('_', ' ')}`;
+};
+const paymentStatusLabel = (status, bookingStatus) =>
+  `Payment: ${bookingStatus === 'cancelled' ? 'cancelled' : String(status || 'pending').replaceAll('_', ' ')}`;
+const formatWaitDuration = (minutes) => {
+  const totalMinutes = Math.max(0, Math.floor(Number(minutes) || 0));
+  if (totalMinutes <= 60) return `${totalMinutes} ${totalMinutes === 1 ? 'minute' : 'minutes'}`;
+  const hours = Math.floor(totalMinutes / 60);
+  const remainingMinutes = totalMinutes % 60;
+  return `${hours} ${hours === 1 ? 'hour' : 'hours'}${remainingMinutes ? ` ${remainingMinutes} ${remainingMinutes === 1 ? 'minute' : 'minutes'}` : ''}`;
+};
 const getLocalDateString = (date = new Date()) => {
   const year = date.getFullYear();
   const month = String(date.getMonth() + 1).padStart(2, '0');
@@ -20,6 +40,135 @@ const formatAppointmentDate = (value) => {
     day: 'numeric',
   });
 };
+const LIST_PAGE_SIZE = 10;
+const SALON_SERVICES = [
+  { name: 'Haircut', category: 'Haircut' },
+  { name: 'Beard trim', category: 'Beard & Shave' },
+  { name: 'Beard shave', category: 'Beard & Shave' },
+  { name: 'Hair curl', category: 'Hair Styling' },
+  { name: 'Hair color', category: 'Hair Color' },
+  { name: 'Head massage', category: 'Head Massage' },
+  { name: 'Face massage', category: 'Face Massage' },
+];
+
+function SalonServiceField({ service, onChange, id }) {
+  const [open, setOpen] = useState(false);
+  const fieldRef = useRef(null);
+
+  useEffect(() => {
+    if (!open) return undefined;
+    const handlePointerDown = (event) => {
+      if (!fieldRef.current?.contains(event.target)) setOpen(false);
+    };
+    const handleKeyDown = (event) => {
+      if (event.key === 'Escape') setOpen(false);
+    };
+    document.addEventListener('pointerdown', handlePointerDown);
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('pointerdown', handlePointerDown);
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [open]);
+
+  const selectService = (option) => {
+    onChange({ ...service, name: option.name, category: option.category });
+    setOpen(false);
+  };
+
+  return (
+    <div className="salon-service-picker" ref={fieldRef}>
+      <input
+        id={id}
+        value={service.name}
+        onChange={(event) => {
+          const name = event.target.value;
+          const option = SALON_SERVICES.find((item) => item.name === name);
+          onChange({
+            ...service,
+            name,
+            category: option?.category || service.category || 'Other',
+          });
+          setOpen(true);
+        }}
+        onFocus={() => setOpen(true)}
+        onClick={() => setOpen(true)}
+        maxLength={80}
+        placeholder="Choose or type service"
+        aria-label="Choose or type a service"
+        aria-expanded={open}
+        aria-controls={`${id}-options`}
+        autoComplete="off"
+        required
+      />
+      {open && (
+        <div className="salon-service-options" id={`${id}-options`} role="listbox" aria-label="Service options">
+          <button type="button" className="salon-service-custom" onClick={() => {
+            onChange({ ...service, category: service.category || 'Other' });
+            setOpen(false);
+          }}>＋ Add new service</button>
+          {SALON_SERVICES
+            .filter((option) => !service.name || option.name.toLowerCase().includes(service.name.toLowerCase()))
+            .map((option) => (
+              <button type="button" role="option" aria-selected={service.name === option.name} key={option.name} onClick={() => selectService(option)}>
+                {option.name}
+              </button>
+            ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function useLoadMore(items, resetKey) {
+  const [visibleCount, setVisibleCount] = useState(LIST_PAGE_SIZE);
+  useEffect(() => {
+    setVisibleCount(LIST_PAGE_SIZE);
+  }, [resetKey]);
+  return {
+    visibleItems: items.slice(0, visibleCount),
+    hasMore: items.length > visibleCount,
+    loadMore: () => setVisibleCount((count) => Math.min(count + LIST_PAGE_SIZE, items.length)),
+  };
+}
+
+function LoadMoreButton({ shown, total, onClick, label = 'items' }) {
+  if (shown >= total) return null;
+  return (
+    <div className="load-more-row">
+      <button className="button button-soft button-small" type="button" aria-label={`Load 10 more ${label}`} onClick={onClick}>
+        Load 10 more
+      </button>
+    </div>
+  );
+}
+
+function ConfirmationDialog({ confirmation, onResolve }) {
+  useEffect(() => {
+    if (!confirmation) return undefined;
+    const handleKeyDown = (event) => {
+      if (event.key === 'Escape') onResolve(false);
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [confirmation, onResolve]);
+
+  if (!confirmation) return null;
+  return (
+    <div className="dialog-backdrop confirmation-backdrop" role="presentation" onMouseDown={(event) => {
+      if (event.target === event.currentTarget) onResolve(false);
+    }}>
+      <section className="auth-dialog confirmation-dialog" role="alertdialog" aria-modal="true" aria-labelledby="confirmation-title" aria-describedby="confirmation-message">
+        <h2 id="confirmation-title">{confirmation.title}</h2>
+        <p id="confirmation-message">{confirmation.message}</p>
+        <div className="confirmation-actions">
+          <button className="button button-soft" type="button" onClick={() => onResolve(false)}>{confirmation.cancelLabel}</button>
+          <button className={`button ${confirmation.danger ? 'button-confirm-danger' : 'button-primary'}`} type="button" autoFocus onClick={() => onResolve(true)}>{confirmation.confirmLabel}</button>
+        </div>
+      </section>
+    </div>
+  );
+}
 
 async function api(path, options = {}) {
   const response = await fetch(`${API_BASE}${path}`, {
@@ -85,6 +234,29 @@ function getSalonDirectionsUrl(salon, location) {
   return `https://www.google.com/maps/dir/?${params.toString()}`;
 }
 
+function MapsLocateLink({ salon, location, className = '', stopPropagation = false }) {
+  return (
+    <a
+      className={`salon-map-link ${className}`.trim()}
+      href={getSalonDirectionsUrl(salon, location)}
+      target="_blank"
+      rel="noopener noreferrer"
+      aria-label={`Locate ${salon.name} in Google Maps`}
+      title={`Locate ${salon.name} in Google Maps`}
+      onClick={stopPropagation ? (event) => event.stopPropagation() : undefined}
+    >
+      <svg className="maps-locate-logo" viewBox="0 0 32 36" aria-hidden="true">
+        <path fill="#4285F4" d="M16 1.5C8.5 1.5 2.5 7.4 2.5 14.8c0 9.1 11.6 19.6 12.1 20.1a2 2 0 0 0 2.8 0c.5-.5 12.1-11 12.1-20.1C29.5 7.4 23.5 1.5 16 1.5Z" />
+        <path fill="#34A853" d="M4.6 8.3 14.2 13l-6.1 9.1c-2.7-3.1-5.6-7-5.6-11.3 0-.9.1-1.7.3-2.5Z" />
+        <path fill="#FBBC04" d="m14.2 13 13.7-1.2c.2 1 .3 2 .3 3 0 3-1.8 6.4-4.1 9.5L14.2 13Z" />
+        <path fill="#EA4335" d="M16 1.5c5.8 0 10.8 3.6 12.6 8.7l-14.4 2.1L4.6 8.3A13.4 13.4 0 0 1 16 1.5Z" />
+        <circle cx="16" cy="14" r="5.1" fill="#fff" />
+      </svg>
+      <span>Locate</span>
+    </a>
+  );
+}
+
 async function resizeProfileImage(file) {
   if (!file.type.startsWith('image/')) throw new Error('Choose an image file.');
   if (file.size > 5 * 1024 * 1024) throw new Error('Choose an image smaller than 5 MB.');
@@ -142,6 +314,59 @@ function ProfilePage({ user, bookings, onUserUpdated, onBack, onSignOut, onCance
   const [saving, setSaving] = useState(false);
   const [profileError, setProfileError] = useState('');
   const [profileMessage, setProfileMessage] = useState('');
+  const [historyBookings, setHistoryBookings] = useState(bookings.slice(0, LIST_PAGE_SIZE));
+  const [historyPage, setHistoryPage] = useState(1);
+  const [historyPages, setHistoryPages] = useState(1);
+  const [historyLoading, setHistoryLoading] = useState(true);
+  const [historyLoadingMore, setHistoryLoadingMore] = useState(false);
+  const historyRequestId = useRef(0);
+
+  useEffect(() => {
+    const requestId = ++historyRequestId.current;
+    setHistoryLoading(true);
+    api(`/api/bookings/my-bookings?page=1&limit=${LIST_PAGE_SIZE}`)
+      .then((result) => {
+        if (requestId !== historyRequestId.current) return;
+        if (!Array.isArray(result.bookings)) throw new Error('The server returned an invalid booking history.');
+        setHistoryBookings(result.bookings);
+        setHistoryPage(1);
+        setHistoryPages(result.pages || 1);
+        setProfileError('');
+      })
+      .catch((requestError) => {
+        if (requestId === historyRequestId.current) setProfileError(requestError.message);
+      })
+      .finally(() => {
+        if (requestId === historyRequestId.current) setHistoryLoading(false);
+      });
+    return () => { historyRequestId.current += 1; };
+  }, [user.id]);
+
+  useEffect(() => {
+    setHistoryBookings((current) => current.map((booking) =>
+      bookings.find((item) => item.id === booking.id) || booking
+    ));
+  }, [bookings]);
+
+  const loadMoreHistory = async () => {
+    if (historyLoadingMore || historyPage >= historyPages) return;
+    const nextPage = historyPage + 1;
+    setHistoryLoadingMore(true);
+    try {
+      const result = await api(`/api/bookings/my-bookings?page=${nextPage}&limit=${LIST_PAGE_SIZE}`);
+      if (!Array.isArray(result.bookings)) throw new Error('The server returned an invalid booking history.');
+      setHistoryBookings((current) => [
+        ...current,
+        ...result.bookings.filter((booking) => !current.some((item) => item.id === booking.id)),
+      ]);
+      setHistoryPage(result.page || nextPage);
+      setHistoryPages(result.pages || 1);
+    } catch (requestError) {
+      setProfileError(requestError.message);
+    } finally {
+      setHistoryLoadingMore(false);
+    }
+  };
 
   const chooseImage = async (event) => {
     const file = event.target.files?.[0];
@@ -193,9 +418,11 @@ function ProfilePage({ user, bookings, onUserUpdated, onBack, onSignOut, onCance
 
   return (
     <section className="profile-page">
-      <button className="text-button profile-back" onClick={onBack}>← Back to salons</button>
-      <div className="profile-page-heading">
-        <div><span className="eyebrow">Your SalonFlow account</span><h1>Your profile</h1><p className="muted">Manage your personal details and keep track of your salon visits.</p></div>
+      <div className="account-profile-header">
+        <button className="text-button profile-back back-navigation" onClick={onBack} aria-label="Back to salons" title="Back to salons"><svg className="back-navigation-icon" viewBox="0 0 32 24" aria-hidden="true"><path d="M13 3 3 12l10 9M4 12h25" /></svg></button>
+        <div className="profile-page-heading">
+          <div><h1>Your profile</h1></div>
+        </div>
         <button className="button button-soft profile-signout" onClick={onSignOut}>Sign out</button>
       </div>
 
@@ -248,13 +475,15 @@ function ProfilePage({ user, bookings, onUserUpdated, onBack, onSignOut, onCance
         <div className="section-heading"><div><span className="eyebrow">Your visits</span><h2>Order &amp; booking history</h2></div></div>
         <div className="booking-history">
           {user.walletCredits > 0 && <div className="credit-banner"><span>✦</span><p>You have <strong>{money(user.walletCredits)}</strong> in SalonFlow credits. These credits remain in your account; UPI reservation advances are paid separately.</p></div>}
-          {!bookings.length && <div className="panel-box profile-empty"><h3>No bookings yet</h3><p className="muted">Your salon bookings and order history will appear here.</p><button className="button button-soft" onClick={onBack}>Explore salons</button></div>}
-          {bookings.map((booking) => (
+          {!historyLoading && !historyBookings.length && <div className="panel-box profile-empty"><h3>No bookings yet</h3><p className="muted">Your salon bookings and order history will appear here.</p><button className="button button-soft" onClick={onBack}>Explore salons</button></div>}
+          {historyBookings.map((booking) => (
             <article className="history-card" key={booking.id}>
-              <div><span className={`status-pill status-${booking.status}`}>{booking.status.replace('_', ' ')}</span><h3>{booking.salonId?.name || booking.salonSnapshot?.name || 'Salon visit'}</h3><p>{booking.services.map((service) => service.name).join(' · ')}</p>{booking.userUid && <p className="queue-position">Your UID: {booking.userUid}</p>}{booking.status === 'waiting' && booking.appointmentDate > getLocalDateString() && <p className="queue-position">Reserved for {formatAppointmentDate(booking.appointmentDate)}</p>}{booking.status === 'waiting' && (booking.appointmentDate || getLocalDateString()) <= getLocalDateString() && booking.queuePosition && <p className="queue-position">Queue #{booking.queuePosition} · about {booking.estimatedWaitMinutes} min</p>}{booking.status === 'in_service' && <p className="queue-position">Your service is in progress</p>}{booking.status === 'rejected' && booking.rejectionReason && <p className="rejection-reason-display">Reason: {booking.rejectionReason}</p>}</div>
-              <div className="history-meta"><strong>{booking.paymentStatus === 'paid' ? `${money(booking.paymentAmount)} paid` : `${money(booking.paymentAmount)} advance pending`}</strong>{booking.paymentMethod === 'upi_manual' && <small>Service charge to pay at salon: {money(booking.total)}</small>}{booking.paymentMethod === 'upi_manual' && booking.upiReference && booking.paymentStatus === 'pending' && <small>UPI reference submitted: {booking.upiReference} · Awaiting verification</small>}{booking.paymentMethod !== 'upi_manual' && booking.paymentMode === 'token' && <small>{money(Math.max(0, booking.total - booking.paymentAmount))} balance at salon</small>}{booking.appointmentDate && <small>Appointment: {formatAppointmentDate(booking.appointmentDate)}</small>}<small>Booked: {new Date(booking.createdAt).toLocaleString()}</small>{booking.status === 'pending_payment' && booking.paymentMethod === 'upi_manual' && !booking.upiReference && booking.upiPayment && <button className="button button-soft button-small" onClick={() => onOpenUpiPayment(booking, booking.upiPayment)}>Pay ₹{booking.paymentAmount} advance</button>}{['waiting', 'pending_payment'].includes(booking.status) && !(booking.paymentMethod === 'upi_manual' && booking.upiReference && booking.paymentStatus === 'pending') && <button className="text-button danger-text" onClick={() => onCancelBooking(booking.id)}>Cancel booking</button>}{booking.paymentMethod === 'upi_manual' && booking.status === 'waiting' && <small>Cancellation credit, if eligible, is SalonFlow credit—not an automatic cash refund.</small>}</div>
+              <div><span className={`status-pill status-${booking.status}`}>{bookingStatusLabel(booking.status)}</span><h3>{booking.salonId?.name || booking.salonSnapshot?.name || 'Salon visit'}</h3><p>{booking.services.map((service) => service.name).join(' · ')}</p>{booking.userUid && <p className="queue-position">Your UID: {booking.userUid}</p>}{booking.status === 'waiting' && booking.appointmentDate > getLocalDateString() && <p className="queue-position">Reserved for {formatAppointmentDate(booking.appointmentDate)}</p>}{booking.status === 'waiting' && (booking.appointmentDate || getLocalDateString()) <= getLocalDateString() && booking.queuePosition && <p className="queue-position">Queue #{booking.queuePosition} · about {formatWaitDuration(booking.estimatedWaitMinutes)}</p>}{booking.status === 'in_service' && <p className="queue-position">Your service is in progress</p>}{booking.status === 'rejected' && booking.rejectionReason && <p className="rejection-reason-display">Reason: {booking.rejectionReason}</p>}</div>
+              <div className="history-meta"><strong>{booking.status === 'cancelled' ? `${money(booking.paymentAmount)} advance payment cancelled` : booking.paymentStatus === 'paid' ? `${money(booking.paymentAmount)} advance payment paid` : `${money(booking.paymentAmount)} advance payment pending`}</strong>{booking.paymentMethod === 'upi_manual' && <small>Service charge to pay at salon: {money(booking.total)}</small>}{booking.paymentMethod === 'upi_manual' && booking.upiReference && booking.paymentStatus === 'pending' && <small>UPI reference submitted: {booking.upiReference} · Awaiting verification</small>}{booking.paymentMethod !== 'upi_manual' && booking.paymentMode === 'token' && <small>{money(Math.max(0, booking.total - booking.paymentAmount))} balance at salon</small>}{booking.appointmentDate && <small>Appointment: {formatAppointmentDate(booking.appointmentDate)}</small>}<small>Booked: {new Date(booking.createdAt).toLocaleString()}</small>{booking.status === 'pending_payment' && booking.paymentMethod === 'upi_manual' && !booking.upiReference && booking.upiPayment && <button className="button button-soft button-small" onClick={() => onOpenUpiPayment(booking, booking.upiPayment)}>Pay ₹{booking.paymentAmount} advance</button>}{['waiting', 'pending_payment'].includes(booking.status) && !(booking.paymentMethod === 'upi_manual' && booking.upiReference && booking.paymentStatus === 'pending') && <button className="text-button danger-text" onClick={() => onCancelBooking(booking.id)}>Cancel booking</button>}</div>
             </article>
           ))}
+          {historyLoading && <p className="muted">Loading booking history…</p>}
+          {historyPage < historyPages && <div className="load-more-row"><button className="button button-soft button-small" type="button" onClick={loadMoreHistory} disabled={historyLoadingMore}>{historyLoadingMore ? 'Loading…' : 'Load 10 more'}</button></div>}
         </div>
       </section>
     </section>
@@ -294,7 +523,7 @@ function UpiPaymentDialog({ booking, payment, onClose, onSubmitReference }) {
       if (event.target === event.currentTarget) onClose();
     }}>
       <section className="auth-dialog upi-dialog" role="dialog" aria-modal="true" aria-labelledby="upi-payment-title">
-        <button className="icon-button dialog-close" onClick={onClose} aria-label="Close payment dialog">×</button>
+        <button className="icon-button dialog-close close-control" onClick={onClose} aria-label="Close payment dialog">×</button>
         <span className="eyebrow">UPI advance</span>
         <h2 id="upi-payment-title">{booking.priority === 'express' ? 'Express booking' : 'Standard booking'}</h2>
         <div className="upi-payment-summary">
@@ -302,7 +531,7 @@ function UpiPaymentDialog({ booking, payment, onClose, onSubmitReference }) {
           <div><span>{booking.priority === 'express' ? 'Express advance (pay now)' : 'Reservation advance (pay now)'}</span><strong>{money(payment.amount)}</strong></div>
           <div className="upi-payment-total"><span>Total booking cost</span><strong>{money(booking.total + payment.amount)}</strong></div>
         </div>
-        <p className="muted">Pay the fixed advance to the platform UPI account. Pay the service amount directly to the salon after your visit. Eligible cancellations return the verified advance as SalonFlow credit, not as an automatic cash refund.</p>
+        <p className="muted">The advance payment is non-refundable. Pay the service amount directly to the salon after your visit.</p>
         <p className="upi-payee"><strong>Pay to:</strong> {payment.payeeName}<br /><strong>Reference:</strong> {payment.reference}</p>
         <a className="button button-primary full-width upi-open-button" href={payment.upiUrl}>Open a UPI app and pay {money(payment.amount)}</a>
         <div className="upi-qr-panel"><span className="fine-print">Or scan this QR code from your UPI app</span>{qrCode ? <img src={qrCode} alt="UPI payment QR code" /> : <span className="muted">Preparing QR code…</span>}</div>
@@ -331,7 +560,6 @@ function OrdersHistoryPage({ user }) {
   const [status, setStatus] = useState('');
   const [page, setPage] = useState(1);
   const [pages, setPages] = useState(1);
-  const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const requestIdRef = useRef(0);
@@ -339,13 +567,14 @@ function OrdersHistoryPage({ user }) {
   useEffect(() => {
     const requestId = ++requestIdRef.current;
     setLoading(true);
-    setBookings([]);
-    setTotal(0);
+    if (page === 1) {
+      setBookings([]);
+    }
     setError('');
     const timer = window.setTimeout(async () => {
       const params = new URLSearchParams({
         page: String(page),
-        limit: '20',
+        limit: String(LIST_PAGE_SIZE),
         timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
       });
       if (fromDate) params.set('fromDate', fromDate);
@@ -358,12 +587,13 @@ function OrdersHistoryPage({ user }) {
         const result = await api(`/api/bookings/history?${params.toString()}`);
         if (requestId !== requestIdRef.current) return;
         if (!Array.isArray(result.bookings)) throw new Error('The server returned an invalid booking history.');
-        setBookings(result.bookings);
+        setBookings((current) => page === 1
+          ? result.bookings
+          : [...current, ...result.bookings.filter((booking) => !current.some((item) => (item._id || item.id) === (booking._id || booking.id)))]);
         setPages(result.pages || 1);
-        setTotal(result.total || 0);
       } catch (requestError) {
         if (requestId === requestIdRef.current) {
-          setBookings([]);
+          if (page === 1) setBookings([]);
           setError(requestError.message);
         }
       } finally {
@@ -420,7 +650,7 @@ function OrdersHistoryPage({ user }) {
       {loading && <p className="muted orders-history-message">Loading booking history…</p>}
       {!loading && !error && !bookings.length && <div className="panel-box profile-empty"><h3>No matching orders</h3><p className="muted">Try changing or clearing the filters.</p></div>}
       <div className="orders-history-list">
-        {!loading && bookings.map((booking) => {
+        {bookings.map((booking) => {
           const salonName = booking.salonId?.name || booking.salonSnapshot?.name || 'Salon';
           const customer = booking.userId;
           const salonOwner = booking.salonId?.ownerId;
@@ -428,7 +658,7 @@ function OrdersHistoryPage({ user }) {
             <article className="panel-box orders-history-card" key={booking._id || booking.id}>
               <div className="orders-history-card-heading">
                 <div>
-                  <span className={`status-pill status-${booking.status || 'unknown'}`}>{String(booking.status || 'unknown').replace('_', ' ')}</span>
+                  <span className={`status-pill status-${booking.status || 'unknown'}`}>{bookingStatusLabel(booking.status)}</span>
                   <h2>{salonName}</h2>
                   <p>{booking.services?.map((service) => `${service.name}${Number.isFinite(service.price) ? ` (${money(service.price)})` : ''}`).join(' · ') || 'Services not recorded'}</p>
                   {(booking.salonId?.city || booking.salonId?.address || booking.salonSnapshot?.city || booking.salonSnapshot?.address) && <p>{[booking.salonId?.address || booking.salonSnapshot?.address, booking.salonId?.city || booking.salonSnapshot?.city].filter(Boolean).join(', ')}</p>}
@@ -439,11 +669,11 @@ function OrdersHistoryPage({ user }) {
                 <div><span>Booked</span><strong>{new Date(booking.createdAt).toLocaleString()}</strong></div>
                 {booking.appointmentDate && <div><span>Appointment</span><strong>{formatAppointmentDate(booking.appointmentDate)}</strong></div>}
                 <div><span>Booking type</span><strong>{booking.priority === 'express' ? 'Express' : 'Standard'}</strong></div>
-                <div><span>Advance</span><strong>{money(booking.paymentAmount)} · {booking.paymentStatus || 'pending'}</strong></div>
+                <div><span>Advance payment</span><strong>{money(booking.paymentAmount)} · {paymentStatusLabel(booking.paymentStatus, booking.status)}</strong></div>
                 <div><span>Service total</span><strong>{money(booking.total)}</strong></div>
                 {booking.expressFee > 0 && <div><span>Express fee</span><strong>{money(booking.expressFee)}</strong></div>}
                 <div><span>Payment method</span><strong>{booking.paymentMethod === 'upi_manual' ? 'UPI' : booking.paymentMethod || 'Not recorded'}</strong></div>
-                {booking.estimatedWaitMinutes > 0 && <div><span>Estimated wait</span><strong>{booking.estimatedWaitMinutes} minutes</strong></div>}
+                {booking.estimatedWaitMinutes > 0 && <div><span>Estimated wait</span><strong>{formatWaitDuration(booking.estimatedWaitMinutes)}</strong></div>}
                 {booking.userUid && <div><span>Your UID</span><strong>{booking.userUid}</strong></div>}
                 {booking.ownerUid && <div><span>Your owner UID</span><strong>{booking.ownerUid}</strong></div>}
                 {!['user', 'customer'].includes(user.role) && customer && <div><span>Customer</span><strong>{customer.name || 'Customer'}{customer.uid ? ` · ${customer.uid}` : ''}{customer.contactPhone ? ` · ${customer.contactPhone}` : ''}</strong></div>}
@@ -458,8 +688,7 @@ function OrdersHistoryPage({ user }) {
       </div>
 
       <div className="orders-history-pagination">
-        <span>{total} booking{total === 1 ? '' : 's'}{total ? ' · newest first' : ''}</span>
-        {pages > 1 && <div><button className="button button-soft button-small" disabled={page <= 1 || loading} onClick={() => setPage((current) => current - 1)}>Previous</button><span>Page {page} of {pages}</span><button className="button button-soft button-small" disabled={page >= pages || loading} onClick={() => setPage((current) => current + 1)}>Next</button></div>}
+        {page < pages && <button className="button button-soft button-small" disabled={loading} onClick={() => setPage((current) => current + 1)}>{loading ? 'Loading…' : 'Load 10 more'}</button>}
       </div>
     </section>
   );
@@ -506,6 +735,7 @@ function SalonProfilePage({ salons, loaded, onRefresh, onSalonChanged, onBack, o
   const [message, setMessage] = useState('');
 
   const selectedSalon = salons.find((salon) => salon.id === selectedId);
+  const serviceList = useLoadMore(draft.services, `${creating}:${selectedId}`);
 
   useEffect(() => {
     if (!salons.some((salon) => salon.id === selectedId)) {
@@ -622,9 +852,11 @@ function SalonProfilePage({ salons, loaded, onRefresh, onSalonChanged, onBack, o
 
   return (
     <section className="profile-page salon-profile-page">
-      <button className="text-button profile-back" onClick={onBack}>← Back to salons</button>
-      <div className="profile-page-heading">
-        <div><span className="eyebrow">Salon management</span><h1>{creating || !selectedSalon ? 'Create your salon profile' : selectedSalon.name}</h1><p className="muted">Manage your salon details, location, services, and prices.</p></div>
+      <div className="salon-profile-header">
+        <button className="text-button profile-back back-navigation" onClick={onBack} aria-label="Back to salons" title="Back to salons"><svg className="back-navigation-icon" viewBox="0 0 32 24" aria-hidden="true"><path d="M13 3 3 12l10 9M4 12h25" /></svg></button>
+        <div className="profile-page-heading">
+          <div><h1>{creating || !selectedSalon ? 'Create your salon profile' : selectedSalon.name}</h1></div>
+        </div>
         <button className="button button-soft profile-signout" onClick={onSignOut}>Sign out</button>
       </div>
 
@@ -646,7 +878,7 @@ function SalonProfilePage({ salons, loaded, onRefresh, onSalonChanged, onBack, o
             </div>
           )}
 
-          {creating && <div className="salon-profile-toolbar"><button type="button" className="text-button" onClick={() => setCreating(false)}>← Cancel adding salon</button></div>}
+          {creating && <div className="salon-profile-toolbar"><button type="button" className="text-button back-navigation" onClick={() => setCreating(false)} aria-label="Cancel adding salon" title="Cancel adding salon"><svg className="back-navigation-icon" viewBox="0 0 32 24" aria-hidden="true"><path d="M13 3 3 12l10 9M4 12h25" /></svg></button></div>}
           {loaded && !salons.length && !creating && <div className="panel-box profile-empty"><h3>Your salon profile starts here</h3><p className="muted">Add salon details and services to submit your salon for approval.</p><button className="button button-primary" onClick={startCreating}>Create salon profile</button></div>}
 
           {(creating || selectedSalon) && (
@@ -682,21 +914,24 @@ function SalonProfilePage({ salons, loaded, onRefresh, onSalonChanged, onBack, o
                 </div>
                 <div className="salon-gallery-editor">
                   <div className="panel-title-row"><div><h3>Salon photos</h3><p className="muted">Upload up to 5 photos of your salon.</p></div><label className="button button-soft button-small upload-photo">Add photos<input type="file" accept="image/png,image/jpeg,image/webp" multiple onChange={uploadSalonPhotos} disabled={(draft.images || []).length >= 5} /></label></div>
-                  {(draft.images || []).length > 0 && <div className="salon-gallery-previews">{draft.images.map((image, index) => <div className="salon-gallery-item" key={`${index}-${image.slice(0, 32)}`}><img src={image} alt={`Salon photo ${index + 1}`} /><button type="button" onClick={() => removeSalonPhoto(index)} aria-label={`Remove salon photo ${index + 1}`}>×</button></div>)}</div>}
+                  {(draft.images || []).length > 0 &&                   <div className="salon-gallery-previews">{draft.images.map((image, index) => <div className="salon-gallery-item" key={`${index}-${image.slice(0, 32)}`}><img src={image} alt={`Salon photo ${index + 1}`} /><button className="close-control" type="button" onClick={() => removeSalonPhoto(index)} aria-label={`Remove salon photo ${index + 1}`}>×</button></div>)}</div>}
                 </div>
               </div>
 
               <div className="salon-services-editor">
                 <div className="panel-title-row"><div><h3>Services and prices</h3><p className="muted">Add, edit, or remove services. Keep at least one service on the salon profile.</p></div><button type="button" className="button button-soft button-small" onClick={() => setDraft((current) => ({ ...current, services: [...current.services, emptyService()] }))}>+ Add service</button></div>
-                {draft.services.map((service, index) => (
+                {serviceList.visibleItems.map((service, index) => (
                   <div className="salon-service-edit-row" key={service._id || `new-${index}`}>
-                    <label>Service name<input value={service.name} onChange={(event) => updateService(index, 'name', event.target.value)} maxLength={80} required /></label>
-                    <label>Category<input value={service.category} onChange={(event) => updateService(index, 'category', event.target.value)} maxLength={40} required /></label>
+                    <label>Service<SalonServiceField id={`salon-service-name-${index}`} service={service} onChange={(value) => setDraft((current) => ({
+                      ...current,
+                      services: current.services.map((item, serviceIndex) => serviceIndex === index ? value : item),
+                    }))} /></label>
                     <label>Price (₹)<input type="number" min="0" step="0.01" value={service.price} onChange={(event) => updateService(index, 'price', event.target.value)} required /></label>
                     <label>Duration (minutes)<input type="number" min="5" max="300" step="1" value={service.durationMinutes} onChange={(event) => updateService(index, 'durationMinutes', event.target.value)} required /></label>
                     <button type="button" className="text-button danger-text salon-service-remove" disabled={draft.services.length === 1} onClick={() => setDraft((current) => ({ ...current, services: current.services.filter((_, serviceIndex) => serviceIndex !== index) }))}>Remove</button>
                   </div>
                 ))}
+                <LoadMoreButton shown={serviceList.visibleItems.length} total={draft.services.length} onClick={serviceList.loadMore} label="services" />
               </div>
               {error && <p className="form-error" role="alert">{error}</p>}
               {message && <p className="profile-success" role="status">{message}</p>}
@@ -720,6 +955,7 @@ function SearchableAdminSelect({ label, value, options, placeholder, onChange, s
   const filteredOptions = sortedOptions.filter((option) =>
     option.label.toLocaleLowerCase().includes(normalizedSearch)
   );
+  const optionList = useLoadMore(filteredOptions, `${open}:${normalizedSearch}`);
   const selectedLabel = sortedOptions.find((option) => option.value === value)?.label || placeholder;
 
   useEffect(() => {
@@ -775,7 +1011,7 @@ function SearchableAdminSelect({ label, value, options, placeholder, onChange, s
               aria-label={`Search ${label.toLocaleLowerCase()}`}
             />
             <div className="admin-search-select-options" role="listbox" aria-label={label}>
-              {filteredOptions.map((option) => (
+              {optionList.visibleItems.map((option) => (
                 <button
                   type="button"
                   role="option"
@@ -788,6 +1024,7 @@ function SearchableAdminSelect({ label, value, options, placeholder, onChange, s
                 </button>
               ))}
               {!filteredOptions.length && <span className="admin-search-select-empty">No matches found.</span>}
+              <LoadMoreButton shown={optionList.visibleItems.length} total={filteredOptions.length} onClick={optionList.loadMore} label="options" />
             </div>
           </div>
         )}
@@ -796,7 +1033,7 @@ function SearchableAdminSelect({ label, value, options, placeholder, onChange, s
   );
 }
 
-function AdminManagement({ customers = [], salons = [], onChanged }) {
+function AdminManagement({ customers = [], salons = [], onChanged, onConfirm }) {
   const [section, setSection] = useState('customers');
   const [search, setSearch] = useState('');
   const [activeFilter, setActiveFilter] = useState('');
@@ -808,7 +1045,6 @@ function AdminManagement({ customers = [], salons = [], onChanged }) {
   const [records, setRecords] = useState([]);
   const [page, setPage] = useState(1);
   const [pages, setPages] = useState(1);
-  const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [message, setMessage] = useState('');
@@ -818,13 +1054,15 @@ function AdminManagement({ customers = [], salons = [], onChanged }) {
   const [createDraft, setCreateDraft] = useState(null);
   const [saving, setSaving] = useState(false);
   const requestIdRef = useRef(0);
+  const createServiceList = useLoadMore(createDraft?.services || [], `create:${section}:${creating}`);
+  const editServiceList = useLoadMore(draft?.services || [], `edit:${editingId}`);
 
-  const loadRecords = useCallback(async () => {
+  const loadRecords = useCallback(async (requestedPage = page) => {
     const requestId = ++requestIdRef.current;
     setLoading(true);
     setError('');
     try {
-      const params = new URLSearchParams({ page: String(page), limit: '20' });
+      const params = new URLSearchParams({ page: String(requestedPage), limit: String(LIST_PAGE_SIZE) });
       if (search.trim()) params.set('search', search.trim());
       let endpoint = '/api/admin/management/';
       if (section === 'customers') {
@@ -851,12 +1089,14 @@ function AdminManagement({ customers = [], salons = [], onChanged }) {
         throw new Error('The server returned an invalid records response. Please refresh and try again.');
       }
       if (requestId !== requestIdRef.current) return;
-      setRecords(nextRecords);
+      setRecords((current) => requestedPage === 1
+        ? nextRecords
+        : [...current, ...nextRecords.filter((record) => !current.some((item) => (item.id || item._id) === (record.id || record._id)))]);
+      if (requestedPage === 1) setPage(1);
       setPages(result.pages || 1);
-      setTotal(result.total || 0);
     } catch (requestError) {
       if (requestId === requestIdRef.current) {
-        setRecords([]);
+        if (requestedPage === 1) setRecords([]);
         setError(requestError.message);
       }
     } finally {
@@ -875,7 +1115,6 @@ function AdminManagement({ customers = [], salons = [], onChanged }) {
     setPage(1);
     setRecords([]);
     setPages(1);
-    setTotal(0);
     setLoading(true);
     setError('');
     setEditingId('');
@@ -902,7 +1141,7 @@ function AdminManagement({ customers = [], salons = [], onChanged }) {
     setDraft(null);
     setCreating(false);
     setCreateDraft(null);
-    loadRecords();
+    loadRecords(1);
     onChanged();
   };
 
@@ -1052,9 +1291,24 @@ function AdminManagement({ customers = [], salons = [], onChanged }) {
   const deleteRecord = async (record) => {
     const label = record.name;
     if (section === 'salons') {
-      if (!window.confirm(`Delete the entire salon profile "${label}" permanently? Its bookings, orders, and history will be kept.`)) return;
-      if (!window.confirm(`Confirm again: permanently remove "${label}" from the database? This cannot be undone. Existing booking and order records will remain.`)) return;
-    } else if (!window.confirm(`Permanently delete "${label}"? This cannot be undone. Accounts with booking or ownership history cannot be deleted.`)) return;
+      if (!await onConfirm({
+        title: 'Delete salon profile?',
+        message: `Delete the entire salon profile "${label}" permanently? Its bookings, orders, and history will be kept.`,
+        confirmLabel: 'Continue',
+        danger: true,
+      })) return;
+      if (!await onConfirm({
+        title: 'Confirm permanent deletion',
+        message: `Permanently remove "${label}" from the database? This cannot be undone. Existing booking and order records will remain.`,
+        confirmLabel: 'Delete permanently',
+        danger: true,
+      })) return;
+    } else if (!await onConfirm({
+      title: 'Delete this account?',
+      message: `Permanently delete "${label}"? This cannot be undone. Accounts with booking or ownership history cannot be deleted.`,
+      confirmLabel: 'Delete permanently',
+      danger: true,
+    })) return;
     const endpoint = section === 'customers' ? 'customers' : 'salons';
     try {
       const result = await api(`/api/admin/management/${endpoint}/${record.id || record._id}`, { method: 'DELETE' });
@@ -1072,7 +1326,7 @@ function AdminManagement({ customers = [], salons = [], onChanged }) {
       });
       setMessage(result.message);
       setError('');
-      await loadRecords();
+      await loadRecords(1);
       onChanged();
     } catch (requestError) {
       setError(requestError.message);
@@ -1080,9 +1334,11 @@ function AdminManagement({ customers = [], salons = [], onChanged }) {
   };
 
   const confirmUpiPayment = async (booking) => {
-    const confirmed = window.confirm(
-      `Confirm that ₹${booking.paymentAmount} was actually credited to the platform account for UPI reference ${booking.upiReference}. Only confirm after checking the bank transaction.`
-    );
+    const confirmed = await onConfirm({
+      title: 'Confirm payment received?',
+      message: `Confirm that ₹${booking.paymentAmount} was actually credited to the platform account for UPI reference ${booking.upiReference}. Only confirm after checking the bank transaction.`,
+      confirmLabel: 'Confirm payment',
+    });
     if (!confirmed) return;
     try {
       const result = await api(`/api/admin/management/bookings/${booking._id}/payment-confirmation`, {
@@ -1090,7 +1346,7 @@ function AdminManagement({ customers = [], salons = [], onChanged }) {
       });
       setMessage(result.message);
       setError('');
-      await loadRecords();
+      await loadRecords(1);
       onChanged();
     } catch (requestError) {
       setError(requestError.message);
@@ -1098,14 +1354,19 @@ function AdminManagement({ customers = [], salons = [], onChanged }) {
   };
 
   const rejectUpiPayment = async (booking) => {
-    if (!window.confirm(`Reject UPI reference ${booking.upiReference} and cancel this booking? First check that the transaction is not credited to the platform account.`)) return;
+    if (!await onConfirm({
+      title: 'Reject payment reference?',
+      message: `Reject UPI reference ${booking.upiReference} and cancel this booking? First check that the transaction is not credited to the platform account.`,
+      confirmLabel: 'Reject reference',
+      danger: true,
+    })) return;
     try {
       const result = await api(`/api/admin/management/bookings/${booking._id}/payment-rejection`, {
         method: 'PATCH',
       });
       setMessage(result.message);
       setError('');
-      await loadRecords();
+      await loadRecords(1);
       onChanged();
     } catch (requestError) {
       setError(requestError.message);
@@ -1191,7 +1452,8 @@ function AdminManagement({ customers = [], salons = [], onChanged }) {
                 <label>Phone<input value={createDraft.phone} onChange={(event) => setCreateDraft((current) => ({ ...current, phone: event.target.value }))} /></label>
               </div>
               <div className="admin-service-editor"><div className="panel-title-row"><h4>Services</h4><button type="button" className="button button-soft button-small" onClick={addCreateService}>+ Add service</button></div>
-                {createDraft.services.map((service, index) => <div className="admin-service-row" key={index}>{[['name','Service'],['category','Category'],['price','Price'],['durationMinutes','Minutes']].map(([key,label]) => <label key={key}>{label}<input type={key === 'price' || key === 'durationMinutes' ? 'number' : 'text'} min={key === 'durationMinutes' ? 5 : 0} value={service[key]} onChange={(event) => updateCreateService(index, key, event.target.value)} required /></label>)}<button type="button" className="text-button danger-text" disabled={createDraft.services.length === 1} onClick={() => setCreateDraft((current) => ({ ...current, services: current.services.filter((_, itemIndex) => itemIndex !== index) }))}>Remove</button></div>)}
+                {createServiceList.visibleItems.map((service, index) => <div className="admin-service-row" key={index}>{[['name','Service'],['category','Category'],['price','Price'],['durationMinutes','Minutes']].map(([key,label]) => <label key={key}>{label}<input type={key === 'price' || key === 'durationMinutes' ? 'number' : 'text'} min={key === 'durationMinutes' ? 5 : 0} value={service[key]} onChange={(event) => updateCreateService(index, key, event.target.value)} required /></label>)}<button type="button" className="text-button danger-text" disabled={createDraft.services.length === 1} onClick={() => setCreateDraft((current) => ({ ...current, services: current.services.filter((_, itemIndex) => itemIndex !== index) }))}>Remove</button></div>)}
+                <LoadMoreButton shown={createServiceList.visibleItems.length} total={createDraft.services.length} onClick={createServiceList.loadMore} label="services" />
               </div>
             </>
           )}
@@ -1247,7 +1509,8 @@ function AdminManagement({ customers = [], salons = [], onChanged }) {
                       <label className="admin-check"><input type="checkbox" checked={draft.isOpen} onChange={(event) => updateDraft('isOpen', event.target.checked)} /> Open for booking</label>
                     </div>
                     <div className="admin-service-editor"><div className="panel-title-row"><h4>Services &amp; prices</h4><button type="button" className="button button-soft button-small" onClick={() => setDraft((current) => ({ ...current, services: [...current.services, { name: '', category: '', price: '', durationMinutes: 30 }] }))}>+ Add service</button></div>
-                      {draft.services.map((service, index) => <div className="admin-service-row" key={service._id || `new-${index}`}>{[['name','Service'],['category','Category'],['price','Price'],['durationMinutes','Minutes']].map(([key,label]) => <label key={key}>{label}<input type={key === 'price' || key === 'durationMinutes' ? 'number' : 'text'} min={key === 'durationMinutes' ? 5 : 0} value={service[key]} onChange={(event) => updateService(index, key, event.target.value)} required /></label>)}<button type="button" className="text-button danger-text" disabled={draft.services.length === 1} onClick={() => setDraft((current) => ({ ...current, services: current.services.filter((_, itemIndex) => itemIndex !== index) }))}>Remove</button></div>)}
+                      {editServiceList.visibleItems.map((service, index) => <div className="admin-service-row" key={service._id || `new-${index}`}>{[['name','Service'],['category','Category'],['price','Price'],['durationMinutes','Minutes']].map(([key,label]) => <label key={key}>{label}<input type={key === 'price' || key === 'durationMinutes' ? 'number' : 'text'} min={key === 'durationMinutes' ? 5 : 0} value={service[key]} onChange={(event) => updateService(index, key, event.target.value)} required /></label>)}<button type="button" className="text-button danger-text" disabled={draft.services.length === 1} onClick={() => setDraft((current) => ({ ...current, services: current.services.filter((_, itemIndex) => itemIndex !== index) }))}>Remove</button></div>)}
+                      <LoadMoreButton shown={editServiceList.visibleItems.length} total={draft.services.length} onClick={editServiceList.loadMore} label="services" />
                     </div>
                     <div className="admin-editor-actions"><button className="button button-primary button-small" disabled={saving}>Save salon</button><button type="button" className="text-button" onClick={() => { setEditingId(''); setDraft(null); }}>Cancel</button></div>
                   </form>
@@ -1255,14 +1518,16 @@ function AdminManagement({ customers = [], salons = [], onChanged }) {
               </>}
 
               {section === 'bookings' && <>
-                <div className="admin-record-summary"><div><strong>{record.userId?.name || 'Customer'} · {record.salonId?.name || record.salonSnapshot?.name || 'Salon'}</strong><span>{record.userId?.email || 'No email'}{record.userId?.uid ? ` · Customer UID: ${record.userId.uid}` : ''}{record.salonId?.ownerId?.uid ? ` · Owner UID: ${record.salonId.ownerId.uid}` : ''} · {(Array.isArray(record.services) ? record.services : []).map((service) => service.name).join(', ')}</span>{record.appointmentDate && <span>Appointment: {formatAppointmentDate(record.appointmentDate)}</span>}{record.paymentMethod === 'upi_manual' && <span>UPI advance: {money(record.paymentAmount)} · platform payee {record.upiPayeeName || 'not recorded'} · Ref: {record.upiReference || 'not submitted'}</span>}<span>Services payable at salon: {money(record.total)} · Booked: {new Date(record.createdAt).toLocaleString()} · {record.priority}</span></div><div className="admin-record-badges"><span className={`status-pill status-${record.status || 'unknown'}`}>{String(record.status || 'unknown').replace('_', ' ')}</span><span className="status-pill">{record.paymentStatus || 'Unknown payment status'}</span></div></div>
-                <div className="admin-record-actions"><span className="admin-booking-amount">{record.paymentStatus === 'paid' ? `${money(record.paymentAmount)} advance received · services ${money(record.total)}` : `${money(record.paymentAmount)} advance pending · services ${money(record.total)}`}</span>{record.paymentMethod === 'upi_manual' && record.status === 'pending_payment' && record.upiReference && <><button className="button button-primary button-small" onClick={() => confirmUpiPayment(record)}>Confirm bank credit</button><button className="button button-soft button-small" onClick={() => rejectUpiPayment(record)}>Reject reference</button></>}{record.status === 'waiting' && <button className="button button-primary button-small" onClick={() => updateBookingStatus(record, 'in_service')}>Start service</button>}{record.status === 'in_service' && <button className="button button-soft button-small" onClick={() => updateBookingStatus(record, 'completed')}>Complete service</button>}</div>
+                <div className="admin-record-summary"><div><strong>{record.userId?.name || 'Customer'} · {record.salonId?.name || record.salonSnapshot?.name || 'Salon'}</strong><span>{record.userId?.email || 'No email'}{record.userId?.uid ? ` · Customer UID: ${record.userId.uid}` : ''}{record.salonId?.ownerId?.uid ? ` · Owner UID: ${record.salonId.ownerId.uid}` : ''} · {(Array.isArray(record.services) ? record.services : []).map((service) => service.name).join(', ')}</span>{record.appointmentDate && <span>Appointment: {formatAppointmentDate(record.appointmentDate)}</span>}{record.paymentMethod === 'upi_manual' && <span>UPI advance payment: {money(record.paymentAmount)} · platform payee {record.upiPayeeName || 'not recorded'} · Ref: {record.upiReference || 'not submitted'}</span>}<span>Services payable at salon: {money(record.total)} · Booked: {new Date(record.createdAt).toLocaleString()} · {record.priority}</span></div><div className="admin-record-badges"><span className={`status-pill status-${record.status || 'unknown'}`}>{bookingStatusLabel(record.status)}</span><span className="status-pill">{paymentStatusLabel(record.paymentStatus, record.status)}</span></div></div>
+                <div className="admin-record-actions"><span className="admin-booking-amount">{record.status === 'cancelled' ? `${money(record.paymentAmount)} advance payment cancelled · services ${money(record.total)}` : record.paymentStatus === 'paid' ? `${money(record.paymentAmount)} advance payment received · services ${money(record.total)}` : `${money(record.paymentAmount)} advance payment pending · services ${money(record.total)}`}</span>{record.paymentMethod === 'upi_manual' && record.status === 'pending_payment' && record.upiReference && <><button className="button button-primary button-small" onClick={() => confirmUpiPayment(record)}>Confirm bank credit</button><button className="button button-soft button-small" onClick={() => rejectUpiPayment(record)}>Reject reference</button></>}{record.status === 'waiting' && <button className="button button-primary button-small" onClick={() => updateBookingStatus(record, 'in_service')}>Start service</button>}{record.status === 'in_service' && <button className="button button-soft button-small" onClick={() => updateBookingStatus(record, 'completed')}>Complete service</button>}</div>
               </>}
             </article>
           );
         })}
       </div>
-      <div className="admin-pagination"><span>{total} record{total === 1 ? '' : 's'}</span><div><button className="button button-soft button-small" disabled={page <= 1 || loading} onClick={() => setPage((current) => current - 1)}>Previous</button><span>Page {page} of {pages}</span><button className="button button-soft button-small" disabled={page >= pages || loading} onClick={() => setPage((current) => current + 1)}>Next</button></div></div>
+      <div className="admin-pagination">
+        {page < pages && <button className="button button-soft button-small" disabled={loading} onClick={() => setPage((current) => current + 1)}>{loading ? 'Loading…' : 'Load 10 more'}</button>}
+      </div>
       <p className="fine-print admin-safety-note">Passwords and payment data are never editable. Permanent deletion asks for confirmation and is blocked when historical bookings or ownership links must be retained. Blocked accounts and salons are excluded from normal access and discovery.</p>
     </section>
   );
@@ -1408,11 +1673,11 @@ function AuthDialog({ onClose, onSignedIn, notify }) {
   };
 
   return (
-    <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => {
+    <div className="dialog-backdrop auth-dialog-backdrop" role="presentation" onMouseDown={(event) => {
       if (event.target === event.currentTarget) onClose();
     }}>
       <section className="auth-dialog" role="dialog" aria-modal="true" aria-labelledby="auth-title">
-        <button className="icon-button dialog-close" onClick={onClose} aria-label="Close dialog">×</button>
+        <button className="icon-button dialog-close close-control" onClick={onClose} aria-label="Close dialog">×</button>
         <span className="eyebrow">SalonFlow account</span>
         <h2 id="auth-title">{mode === 'login' ? 'Welcome back' : mode === 'reset' ? 'Reset your password' : 'Create your account'}</h2>
         <p className="muted">Your next great salon visit starts here.</p>
@@ -1594,6 +1859,9 @@ function App() {
   const [salonImageIndexes, setSalonImageIndexes] = useState({});
   const [mySalonRatings, setMySalonRatings] = useState({});
   const [ratingSavingFor, setRatingSavingFor] = useState('');
+  const [salonsReady, setSalonsReady] = useState(false);
+  const [sessionReady, setSessionReady] = useState(false);
+  const [bootLoaderVisible, setBootLoaderVisible] = useState(true);
   const [selectedSalon, setSelectedSalon] = useState(null);
   const [bookingPanelOpen, setBookingPanelOpen] = useState(false);
   const [user, setUser] = useState(null);
@@ -1615,6 +1883,9 @@ function App() {
   const [appointmentDate, setAppointmentDate] = useState(() => getLocalDateString());
   const [bookings, setBookings] = useState([]);
   const [upiPayment, setUpiPayment] = useState(null);
+  const [nonRefundableNoticeOpen, setNonRefundableNoticeOpen] = useState(false);
+  const [confirmation, setConfirmation] = useState(null);
+  const confirmationResolverRef = useRef(null);
   const [authOpen, setAuthOpen] = useState(false);
   const [authReturnPage, setAuthReturnPage] = useState('profile');
   const [toast, setToast] = useState('');
@@ -1709,6 +1980,24 @@ function App() {
     toastTimerRef.current = window.setTimeout(() => setToast(''), 3500);
   }, []);
 
+  const requestConfirmation = useCallback((options) => new Promise((resolve) => {
+    confirmationResolverRef.current = resolve;
+    setConfirmation({
+      title: options.title || 'Please confirm',
+      message: options.message,
+      confirmLabel: options.confirmLabel || 'Continue',
+      cancelLabel: options.cancelLabel || 'Cancel',
+      danger: Boolean(options.danger),
+    });
+  }), []);
+
+  const resolveConfirmation = useCallback((confirmed) => {
+    const resolve = confirmationResolverRef.current;
+    confirmationResolverRef.current = null;
+    setConfirmation(null);
+    resolve?.(confirmed);
+  }, []);
+
   useEffect(() => () => window.clearTimeout(toastTimerRef.current), []);
 
   const loadSalons = useCallback(async () => {
@@ -1731,6 +2020,8 @@ function App() {
       setError('');
     } catch (requestError) {
       if (requestId === salonRequestIdRef.current) setError(requestError.message);
+    } finally {
+      if (requestId === salonRequestIdRef.current) setSalonsReady(true);
     }
   }, [search, openOnly, maxWait, maxPrice, maxDistance, location]);
 
@@ -1831,8 +2122,26 @@ function App() {
   }, [ownerSalonId]);
 
   useEffect(() => {
-    api('/api/auth/me').then((result) => setUser(result.user)).catch(() => {});
+    api('/api/auth/me')
+      .then((result) => setUser(result.user))
+      .catch(() => {})
+      .finally(() => setSessionReady(true));
   }, []);
+
+  useEffect(() => {
+    if (!salonsReady || !sessionReady) return undefined;
+    const timer = window.setTimeout(() => setBootLoaderVisible(false), 450);
+    return () => window.clearTimeout(timer);
+  }, [salonsReady, sessionReady]);
+
+  useEffect(() => {
+    if (!bootLoaderVisible) return undefined;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => {
+      document.body.style.overflow = previousOverflow;
+    };
+  }, [bootLoaderVisible]);
 
   useEffect(() => {
     if (user?.role !== 'user') {
@@ -1933,6 +2242,7 @@ function App() {
 
   const bookNow = async () => {
     if (!user) {
+      setAuthReturnPage('home');
       setAuthOpen(true);
       return;
     }
@@ -1967,6 +2277,14 @@ function App() {
     } finally {
       setBusy(false);
     }
+  };
+
+  const requestBooking = () => {
+    if (!user) {
+      bookNow();
+      return;
+    }
+    setNonRefundableNoticeOpen(true);
   };
 
   const submitUpiReference = async (bookingId, upiReference) => {
@@ -2047,9 +2365,14 @@ function App() {
   };
 
   const setCustomerBlocked = async (salonId, customerId, blocked) => {
-    if (!window.confirm(blocked
-      ? 'Block this customer from making future bookings at this salon? Their current booking will not be changed.'
-      : 'Allow this customer to make new bookings at this salon again?')) return;
+    if (!await requestConfirmation({
+      title: blocked ? 'Block this customer?' : 'Unblock this customer?',
+      message: blocked
+        ? 'Block this customer from making future bookings at this salon? Their current booking will not be changed.'
+        : 'Allow this customer to make new bookings at this salon again?',
+      confirmLabel: blocked ? 'Block customer' : 'Unblock customer',
+      danger: blocked,
+    })) return;
     try {
       const result = await api(`/api/salons/mine/${salonId}/customers/${customerId}/block`, {
         method: 'PATCH',
@@ -2159,7 +2482,15 @@ function App() {
     }
   };
 
-  const reportPathForOwner = user?.role === 'owner';
+  const reportPathForOwner = user?.role === 'owner' && page === 'salon';
+  const salonList = useLoadMore(salons, JSON.stringify([search, openOnly, maxWait, maxPrice, maxDistance]));
+  const ownerSalonList = useLoadMore(ownerSalons, user?.id || '');
+  const queueList = useLoadMore(queue, ownerSalonId);
+  const blockedCustomerList = useLoadMore(blockedCustomers, ownerSalonId);
+  const ownerHistoryList = useLoadMore(ownerBookingHistory, ownerSalonId);
+  const pendingSalonList = useLoadMore(pendingSalons, 'admin-pending-salons');
+  const reportServiceList = useLoadMore(report?.services || [], JSON.stringify([reportSalon, reportCustomer, serviceCategory, period]));
+  const bookingServiceList = useLoadMore(selectedSalon?.services || [], selectedSalon?.id || '');
   const reportSalons = user?.role === 'admin' ? adminSalons : ownerSalons;
   const reportCategories = [...new Set([
     'Haircut',
@@ -2180,7 +2511,7 @@ function App() {
   };
 
   return (
-    <div className="app-shell">
+    <div className={`app-shell ${bootLoaderVisible ? 'is-boot-loading' : ''}`} aria-busy={bootLoaderVisible}>
       <header className="topbar topbar-no-search">
         <a className="brand" href="#home" onClick={() => setPage('home')} aria-label="SalonFlow home"><span className="brand-mark">S</span>SalonFlow</a>
         <nav className="nav">
@@ -2256,7 +2587,7 @@ function App() {
             <div className="art-glow" />
             <div className="art-circle"><span className="art-scissors">✂</span></div>
             <div className="floating-card floating-top"><span className="live-dot" /> LIVE QUEUE <strong>{salons.reduce((sum, salon) => sum + salon.queueCount, 0)} waiting</strong></div>
-            <div className="floating-card floating-bottom"><span className="sparkle">✦</span><div><small>QUICKEST NEAR YOU</small><strong>{fastest?.name || 'Find your favourite'}</strong><small>{fastest ? `${fastest.waitMinutes} min estimated wait` : 'Turn on location to get started'}</small></div></div>
+            <div className="floating-card floating-bottom"><span className="sparkle">✦</span><div><small>QUICKEST NEAR YOU</small><strong>{fastest?.name || 'Find your favourite'}</strong><small>{fastest ? `${formatWaitDuration(fastest.waitMinutes)} estimated wait` : 'Turn on location to get started'}</small></div></div>
             <div className="art-caption">Look sharp.<br />Feel like you.</div>
           </div>
         </section> */}
@@ -2265,7 +2596,7 @@ function App() {
           {page === 'home' && <div className="home-search">
             <div className="search-box">
               <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Salon name, street, or area" aria-label="Search salons" />
-              {search && <button className="search-clear-button" type="button" onClick={() => setSearch('')} aria-label="Clear salon search" title="Clear search">×</button>}
+              {search && <button className="search-clear-button close-control" type="button" onClick={() => setSearch('')} aria-label="Clear salon search" title="Clear search">×</button>}
               <button className="search-submit-button" type="button" onClick={loadSalons} aria-label="Search salons" title="Search salons">
                 <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.8" cy="10.8" r="6.8" /><path d="m16 16 4.5 4.5" /></svg>
               </button>
@@ -2294,16 +2625,17 @@ function App() {
           </div> */}
           <div className="filter-bar">
             <label className="check-filter"><input type="checkbox" checked={openOnly} onChange={(event) => setOpenOnly(event.target.checked)} /><span>Open now</span></label>
-            <select className="filter-select wait-filter" aria-label="Wait time filter" value={maxWait} onChange={(event) => setMaxWait(event.target.value)}><option value="">Waiting time</option><option value="10">10 min</option><option value="20">20 min</option><option value="30">30 min</option><option value="60">60 min</option></select>
-            <select className="filter-select" aria-label="Service price filter" value={maxPrice} onChange={(event) => setMaxPrice(event.target.value)}><option value="">Any price</option><option value="200">₹200</option><option value="350">₹350</option><option value="500">₹500</option><option value="1000">₹1,000</option></select>
+            <select className="filter-select wait-filter" aria-label="Wait time filter" value={maxWait} onChange={(event) => setMaxWait(event.target.value)}><option value="">Waiting time</option><option value="10">Up to 10 min</option><option value="15">Up to 15 min</option><option value="20">Up to 20 min</option><option value="30">Up to 30 min</option><option value="45">Up to 45 min</option><option value="60">Up to 60 min</option><option value="90">Up to 90 min</option><option value="120">Up to 2 hours</option></select>
+            <select className="filter-select" aria-label="Service price filter" value={maxPrice} onChange={(event) => setMaxPrice(event.target.value)}><option value="">Any price</option><option value="100">Up to ₹100</option><option value="150">Up to ₹150</option><option value="200">Up to ₹200</option><option value="250">Up to ₹250</option><option value="300">Up to ₹300</option><option value="350">Up to ₹350</option><option value="400">Up to ₹400</option><option value="500">Up to ₹500</option><option value="1000">Up to ₹1,000</option></select>
             <select className="filter-select" aria-label="Distance filter" value={maxDistance} onChange={(event) => { setMaxDistance(event.target.value); if (event.target.value && !location) locateMe(); }}><option value="">Any distance</option><option value="2">2 km</option><option value="5">5 km</option><option value="10">10 km</option><option value="25">25 km</option></select>
           </div>
           {!location && <p className="fine-print">{locationStatus === 'detecting' ? 'Detecting your location automatically. Allow the browser location prompt to calculate nearby distances and directions.' : locationStatus === 'imprecise' ? 'Getting a usable location fix. Distances will appear when the device provides one.' : 'Location is unavailable. Allow location access in your browser to calculate distances and directions; you can still search by area.'}{maxDistance ? ' The distance filter will apply when location is available.' : ''}</p>}
-          {error && <div className="alert" role="alert"><span>{error}</span><button className="icon-button" onClick={() => setError('')} aria-label="Dismiss error">×</button></div>}
+          {error && <div className="alert" role="alert"><span>{error}</span><button className="icon-button close-control" onClick={() => setError('')} aria-label="Dismiss error">×</button></div>}
           <div className={`discover-grid ${bookingPanelOpen ? 'booking-open' : ''}`}>
             <div className="salon-list">
               {!salons.length && !error && <div className="empty-state"><span>✦</span><h3>No salons match just yet</h3><p>Try a wider search or remove one of your filters.</p></div>}
-              {salons.map((salon, index) => {
+              {salonList.visibleItems.map((salon) => {
+                const index = salons.findIndex((item) => item.id === salon.id);
                 const salonImages = [salon.image, ...(salon.images || [])].filter(Boolean);
                 const imageIndex = salonImageIndexes[salon.id] || 0;
                 const displayedImage = salonImages[imageIndex] || salonImages[0];
@@ -2356,36 +2688,38 @@ function App() {
                       </div>
                     </div>
                     <p className="salon-address">{salon.address}, {salon.city}</p>
-                    <div className="salon-metrics"><span>◷ {salon.waitMinutes} min wait</span><span title={locationFixRef.current ? `Straight-line distance; location accuracy is about ±${Math.round(locationFixRef.current.accuracy)} m. Google Maps provides the road route distance.` : 'Straight-line distance; Google Maps provides the road route distance'}>{formatSalonDistance(salon.distanceKm, locationFixRef.current?.accuracy)}</span><span>{salon.queueCount} waiting</span></div>
+                    <div className="salon-metrics"><span>◷ {formatWaitDuration(salon.waitMinutes)} wait</span><span title={locationFixRef.current ? `Straight-line distance; location accuracy is about ±${Math.round(locationFixRef.current.accuracy)} m. Google Maps provides the road route distance.` : 'Straight-line distance; Google Maps provides the road route distance'}>{formatSalonDistance(salon.distanceKm, locationFixRef.current?.accuracy)}</span><span>{salon.queueCount} waiting</span></div>
                     <div className="service-tags">{salon.services.slice(0, 3).map((service) => <span key={service._id}>{service.name} · {money(service.price)}</span>)}</div>
-                    <a className="salon-map-link" href={getSalonDirectionsUrl(salon, location)} target="_blank" rel="noopener noreferrer" aria-label={`Get directions to ${salon.name} in Google Maps`} onClick={(event) => event.stopPropagation()} title="Get directions in Google Maps">⌖ Directions</a>
+                    <MapsLocateLink salon={salon} location={location} stopPropagation />
                   </div>
                 </article>
                 );
               })}
+              <LoadMoreButton shown={salonList.visibleItems.length} total={salons.length} onClick={salonList.loadMore} label="salons" />
             </div>
 
             {bookingPanelOpen && <button className="booking-modal-backdrop" type="button" onClick={closeBookingPanel} aria-label="Close booking details" />}
             <aside className={`booking-panel ${bookingPanelOpen ? 'is-mobile-open' : ''}`} id="booking" role={bookingPanelOpen ? 'dialog' : undefined} aria-modal={bookingPanelOpen ? 'true' : undefined} aria-labelledby="booking-panel-title">
-              <div className="booking-panel-head"><span className="eyebrow">Book Your Slot</span><button ref={bookingCloseRef} className="icon-button booking-mobile-close" type="button" onClick={closeBookingPanel} aria-label="Close booking details">×</button><h2 id="booking-panel-title">{selectedSalon?.name || 'Choose a salon'}</h2><p>{selectedSalon ? `${selectedSalon.address}, ${selectedSalon.city}` : 'Select a salon to see its services and queue.'}</p></div>
+              <div className="booking-panel-head"><span className="eyebrow">Book Your Slot</span><button ref={bookingCloseRef} className="icon-button booking-mobile-close close-control" type="button" onClick={closeBookingPanel} aria-label="Close booking details">×</button><h2 id="booking-panel-title">{selectedSalon?.name || 'Choose a salon'}</h2><p>{selectedSalon ? `${selectedSalon.address}, ${selectedSalon.city}` : 'Select a salon to see its services and queue.'}</p></div>
               {selectedSalon && (
                 <>
-                  <div className={`booking-salon-status ${selectedSalon.isOpen ? 'is-open' : 'is-closed'}`} role="status">Salon status: <strong>{selectedSalon.isOpen ? 'Open now' : 'Closed'}</strong></div>
+                  <div className="booking-salon-status" role="status"><span className="booking-status-label">Status</span><strong className={`booking-status-badge ${selectedSalon.isOpen ? 'is-open' : 'is-closed'}`}>{selectedSalon.isOpen ? 'OPEN' : 'CLOSED'}</strong></div>
                   <div className="salon-contact">
                     {selectedSalon.phone && <a href={`tel:${selectedSalon.phone}`}>☎ Call salon</a>}
                     <button type="button" onClick={() => user ? setMessageSalonId((current) => current === selectedSalon.id ? '' : selectedSalon.id) : setAuthOpen(true)}>✉ Message</button>
+                    <MapsLocateLink salon={selectedSalon} location={location} className="booking-map-link" />
                   </div>
                   {messageSalonId === selectedSalon.id && <MessageComposer recipient={`the owner of ${selectedSalon.name}`} onClose={() => setMessageSalonId('')} onSend={(message) => sendMessage(`/api/salons/${selectedSalon.id}/message`, message)} />}
-                  <div className="queue-spotlight"><span className="queue-icon">◷</span><div><small>ESTIMATED WAIT</small><strong>{visibleWait} minutes</strong></div><span className="queue-live"><i /> Live</span></div>
+                  <div className="queue-spotlight"><span className="queue-icon">◷</span><div><small>ESTIMATED WAIT</small><strong>{formatWaitDuration(visibleWait)}</strong></div><span className="queue-live"><i /> Live</span></div>
                   <label className="appointment-date-field">Appointment date<input type="date" value={appointmentDate} min={getLocalDateString()} onChange={(event) => setAppointmentDate(event.target.value)} required /><small>Choose today, tomorrow, or another available day.</small></label>
-                  <div className="service-picker"><h3>Choose your services</h3>{selectedSalon.services.map((service) => (
+                  <div className="service-picker"><h3>Choose your services</h3>{bookingServiceList.visibleItems.map((service) => (
                     <label className="service-option" key={service._id}>
                       <input type="checkbox" checked={selectedServices.includes(service._id)} onChange={() => toggleService(service._id)} />
                       <span className="service-check" />
                       <span className="service-info"><strong>{service.name}</strong><small>{service.durationMinutes} min · {service.category}</small></span>
                       <strong className="service-price">{money(service.price)}</strong>
                     </label>
-                  ))}</div>
+                  ))}<LoadMoreButton shown={bookingServiceList.visibleItems.length} total={selectedSalon.services.length} onClick={bookingServiceList.loadMore} label="services" /></div>
                   <div className="option-group"><span>Choose your booking type</span><div className="segmented"><button type="button" className={priority === 'standard' ? 'active' : ''} onClick={() => setPriority('standard')}>Standard · Pay ₹1</button><button type="button" className={priority === 'express' ? 'active' : ''} onClick={() => setPriority('express')}>Express · Pay ₹25</button></div></div>
                   <div className="upi-price-breakdown">
                     <div><span>Selected services (pay at salon)</span><strong>{money(selectedTotal)}</strong></div>
@@ -2394,7 +2728,7 @@ function App() {
                   </div>
                   {priority === 'express' && <p className="fine-print">Express bookings are placed ahead of waiting standard bookings; customers already in service are not interrupted.</p>}
                   <p className="fine-print">The advance is paid to the platform account. Pay the selected service charges directly to the salon after your visit. Your queue place is confirmed only after the advance is verified.</p>
-                  <button className="button button-primary full-width book-button" disabled={busy || !selectedSalon.isOpen || !selectedServices.length} onClick={bookNow}>{busy ? 'Preparing UPI payment…' : selectedSalon.isOpen ? `Continue · Pay ${money(advanceAmount)}` : 'Salon currently closed'}</button>
+                  <button className="button button-primary full-width book-button" disabled={busy || !selectedSalon.isOpen || !selectedServices.length} onClick={requestBooking}>{busy ? 'Preparing UPI payment…' : selectedSalon.isOpen ? `Continue · Pay ${money(advanceAmount)}` : 'Salon currently closed'}</button>
                   <p className="secure-note">UPI intent and a locally generated QR are provided. The booking stays pending until payment is verified.</p>
                 </>
               )}
@@ -2402,7 +2736,7 @@ function App() {
           </div>
         </section>}
 
-        {user?.role === 'owner' && (
+        {user?.role === 'owner' && page === 'salon' && (
           <section className="dashboard-section" id="owner">
             <div className="section-heading"><div><span className="eyebrow">Owner studio</span><h2>Your salon, in the moment</h2></div><button className="button button-soft" onClick={() => setShowSalonForm((visible) => !visible)}>{showSalonForm ? 'Close form' : '+ Add a salon'}</button></div>
             {showSalonForm && (
@@ -2423,7 +2757,7 @@ function App() {
               <div className="panel-box">
                 <div className="panel-title-row"><h3>Salon operations</h3><button className={`icon-button ${ownerSalonsRefreshing ? 'is-refreshing' : ''}`} onClick={loadOwnerSalons} disabled={ownerSalonsRefreshing} aria-label={ownerSalonsRefreshing ? 'Refreshing salons' : 'Refresh salons'} title={ownerSalonsRefreshing ? 'Refreshing…' : 'Refresh salons'}>↻</button></div>
                 {!ownerSalons.length && <p className="muted">Add a salon to start managing its queue. New salons need admin approval before customers can book.</p>}
-                {ownerSalons.map((salon) => <div className="owner-salon-row" key={salon.id}>
+                {ownerSalonList.visibleItems.map((salon) => <div className="owner-salon-row" key={salon.id}>
                   <div><strong>{salon.name}</strong><small>{salon.city} · {salon.isApproved ? 'Approved' : 'Awaiting approval'}</small></div>
                   <label className={`salon-status-toggle ${salon.isOpen ? 'is-open' : 'is-closed'}`} title={salon.isApproved ? 'Toggle salon open status' : 'Salon must be approved before opening'}>
                     <input type="checkbox" role="switch" aria-label={`${salon.name} open status`} disabled={!salon.isApproved} checked={salon.isOpen} onChange={(event) => setSalonOpen(salon, event.target.checked)} />
@@ -2431,18 +2765,20 @@ function App() {
                     <strong>{salon.isOpen ? 'Open' : 'Closed'}</strong>
                   </label>
                 </div>)}
+                <LoadMoreButton shown={ownerSalonList.visibleItems.length} total={ownerSalons.length} onClick={ownerSalonList.loadMore} label="salons" />
               </div>
               <div className="panel-box queue-panel">
                 <div className="panel-title-row"><h3>Live queue</h3><select value={ownerSalonId} onChange={(event) => setOwnerSalonId(event.target.value)} aria-label="Choose salon"><option value="">Choose salon</option>{ownerSalons.map((salon) => <option key={salon.id} value={salon.id}>{salon.name}</option>)}</select></div>
                 {!queue.length && <p className="muted">No customers are waiting right now.</p>}
                 {blockedCustomers.length > 0 && <section className="blocked-customers">
                   <h4>Blocked customers ({blockedCustomers.length})</h4>
-                  {blockedCustomers.map((customer) => <div className="blocked-customer-row" key={customer.id}>
+                  {blockedCustomerList.visibleItems.map((customer) => <div className="blocked-customer-row" key={customer.id}>
                     <span><strong>{customer.name}</strong><small>{customer.uid || customer.email || customer.contactPhone || 'Customer'}</small></span>
                     <button className="button button-soft button-small" onClick={() => setCustomerBlocked(ownerSalonId, customer.id, false)}>Unblock</button>
                   </div>)}
+                  <LoadMoreButton shown={blockedCustomerList.visibleItems.length} total={blockedCustomers.length} onClick={blockedCustomerList.loadMore} label="customers" />
                 </section>}
-                {queue.map((booking) => <div className="queue-row" key={booking.id}>
+                {queueList.visibleItems.map((booking) => <div className="queue-row" key={booking.id}>
                   <span className="queue-number">{booking.status === 'in_service' ? '✂' : `#${booking.queuePosition}`}</span>
                   <div className="queue-customer"><strong>{booking.user?.name || 'Customer'}</strong><small>{booking.services.map((service) => service.name).join(' + ')} · {booking.priority}</small>{booking.user?.contactPhone && <a className="queue-phone" href={`tel:${booking.user.contactPhone}`}>☎ {booking.user.contactPhone}</a>}</div>
                   <button className="button button-soft button-small" onClick={() => setMessageBookingId((current) => current === booking.id ? '' : booking.id)}>Message</button>
@@ -2469,15 +2805,17 @@ function App() {
                   </form>}
                   {messageBookingId === booking.id && <MessageComposer recipient={booking.user?.name || 'customer'} onClose={() => setMessageBookingId('')} onSend={(message) => sendMessage(`/api/bookings/${booking.id}/message`, message)} />}
                 </div>)}
+                <LoadMoreButton shown={queueList.visibleItems.length} total={queue.length} onClick={queueList.loadMore} label="bookings" />
               </div>
             </div>
             <section className="panel-box owner-booking-history">
-              <div className="panel-title-row"><div><h3>Booking history</h3>{ownerAccountUid && <span className="fine-print">Your UID: {ownerAccountUid}</span>}</div><span className="fine-print">Latest {ownerBookingHistory.length} bookings</span></div>
+              <div className="panel-title-row"><div><h3>Booking history</h3>{ownerAccountUid && <span className="fine-print">Your UID: {ownerAccountUid}</span>}</div></div>
               {!ownerBookingHistory.length && <p className="muted">No booking history for this salon yet.</p>}
-              {ownerBookingHistory.map((booking) => <article className="owner-booking-history-row" key={booking._id}>
-                <div><strong>{booking.userId?.name || 'Customer'} · {booking.services.map((service) => service.name).join(', ')}</strong><small>{booking.userId?.uid ? `Customer UID: ${booking.userId.uid} · ` : ''}{booking.appointmentDate ? `Appointment: ${formatAppointmentDate(booking.appointmentDate)} · ` : ''}Booked: {new Date(booking.createdAt).toLocaleString()}</small>{booking.status === 'rejected' && booking.rejectionReason && <small>Rejection reason: {booking.rejectionReason}</small>}{booking.rejectionFeedback && <small>Customer feedback: {booking.rejectionFeedback}</small>}{booking.status === 'rejected' && !booking.rejectionEmailSentAt && booking.userId?.email && <button className="button button-soft button-small" onClick={() => retryRejectionEmail(booking._id)}>Retry rejection email</button>}{booking.userId?._id && <button className="button button-soft button-small" onClick={() => setCustomerBlocked(ownerSalonId, booking.userId._id, !booking.customerBlocked)}>{booking.customerBlocked ? 'Unblock customer' : 'Block customer'}</button>}</div>
-                <span className={`status-pill status-${booking.status}`}>{booking.status.replace('_', ' ')}</span>
+              {ownerHistoryList.visibleItems.map((booking) => <article className="owner-booking-history-row" key={booking._id}>
+                <div><strong>{booking.userId?.name || 'Customer'} · {booking.services.map((service) => service.name).join(', ')}</strong><small>{booking.userId?.uid ? `Customer UID: ${booking.userId.uid} · ` : ''}{booking.appointmentDate ? `Appointment: ${formatAppointmentDate(booking.appointmentDate)} · ` : ''}Booked: {new Date(booking.createdAt).toLocaleString()}</small>{booking.status === 'rejected' && booking.rejectionReason && <small>Rejection reason: {booking.rejectionReason}</small>}{booking.rejectionFeedback && <small>Customer feedback: {booking.rejectionFeedback}</small>}{booking.status === 'rejected' && !booking.rejectionEmailSentAt && booking.userId?.email && <button className="button button-soft button-small" onClick={() => retryRejectionEmail(booking._id)}>Retry rejection email</button>}{booking.userId?._id && <button className="button button-soft button-small owner-history-block-button" onClick={() => setCustomerBlocked(ownerSalonId, booking.userId._id, !booking.customerBlocked)}>{booking.customerBlocked ? 'Unblock customer' : 'Block customer'}</button>}</div>
+                <span className={`status-pill status-${booking.status}`}>{bookingStatusLabel(booking.status)}</span>
               </article>)}
+              <LoadMoreButton shown={ownerHistoryList.visibleItems.length} total={ownerBookingHistory.length} onClick={ownerHistoryList.loadMore} label="bookings" />
             </section>
           </section>
         )}
@@ -2486,11 +2824,12 @@ function App() {
           <section className="dashboard-section" id="dashboard">
             <div className="section-heading"><div><span className="eyebrow">Platform overview</span><h2>SalonFlow at a glance</h2></div><div className="report-controls"><select value={period} onChange={(event) => setPeriod(event.target.value)}><option value="day">Today</option><option value="week">This week</option><option value="month">This month</option><option value="year">This year</option></select><SearchableAdminSelect label="Salon" showLabel={false} value={reportSalon} placeholder="All salons" options={[{ value: '', label: 'All salons' }, ...reportSalons.map((salon) => ({ value: salon.id, label: `${salon.name || 'Salon'}${salon.ownerName ? ` · ${salon.ownerName}` : ''}${salon.ownerEmail ? ` · ${salon.ownerEmail}` : ''}${salon.ownerUid ? ` · ${salon.ownerUid}` : ''}` }))]} onChange={setReportSalon} /><SearchableAdminSelect label="Customer" showLabel={false} value={reportCustomer} placeholder="All customers" options={[{ value: '', label: 'All customers' }, ...adminCustomers.map((customer) => ({ value: customer.id, label: `${customer.name || 'Customer'}${customer.email ? ` · ${customer.email}` : ''}${customer.uid ? ` · ${customer.uid}` : ''}` }))]} onChange={setReportCustomer} /><select value={serviceCategory} onChange={(event) => setServiceCategory(event.target.value)}><option value="">All services</option>{reportCategories.map((category) => <option value={category} key={category}>{category}</option>)}</select><button className="button button-soft" onClick={clearReportFilters} disabled={!reportSalon && !reportCustomer && !serviceCategory}>Clear filters</button><button className="button button-soft" onClick={downloadReport}>↓ Export CSV</button></div></div>
             <ReportCards report={report} />
-            <div className="panel-box report-breakdown"><h3>Service performance</h3>{report?.services?.length ? report.services.map((service) => <div className="report-row" key={service.category}><span>{service.category}<small>{service.orders} services booked</small></span><strong>{money(service.revenue)}</strong></div>) : <p className="muted">No paid bookings in this period yet.</p>}</div>
-            <div className="panel-box approvals"><div className="panel-title-row"><h3>Salon applications</h3><span className="result-count">{pendingSalons.length} pending</span></div>{!pendingSalons.length && <p className="muted">All caught up.</p>}{pendingSalons.map((salon) => <div className="owner-salon-row" key={salon.id}><div><strong>{salon.name}</strong><small>{salon.address}, {salon.city} · {salon.ownerId?.name || 'Owner'}{salon.ownerId?.uid ? ` · UID: ${salon.ownerId.uid}` : ''}</small></div><div className="approval-actions"><button className="button button-primary button-small" onClick={() => setSalonApproval(salon.id, true)}>Approve</button><button className="button button-soft button-small" onClick={() => setSalonApproval(salon.id, false)}>Keep pending</button></div></div>)}</div>
+            <div className="panel-box report-breakdown"><h3>Service performance</h3>{report?.services?.length ? reportServiceList.visibleItems.map((service) => <div className="report-row" key={service.category}><span>{service.category}<small>{service.orders} services booked</small></span><strong>{money(service.revenue)}</strong></div>) : <p className="muted">No paid bookings in this period yet.</p>}<LoadMoreButton shown={reportServiceList.visibleItems.length} total={(report?.services || []).length} onClick={reportServiceList.loadMore} label="service categories" /></div>
+            <div className="panel-box approvals"><div className="panel-title-row"><h3>Salon applications</h3><span className="result-count">{pendingSalons.length} pending</span></div>{!pendingSalons.length && <p className="muted">All caught up.</p>}{pendingSalonList.visibleItems.map((salon) => <div className="owner-salon-row" key={salon.id}><div><strong>{salon.name}</strong><small>{salon.address}, {salon.city} · {salon.ownerId?.name || 'Owner'}{salon.ownerId?.uid ? ` · UID: ${salon.ownerId.uid}` : ''}</small></div><div className="approval-actions"><button className="button button-primary button-small" onClick={() => setSalonApproval(salon.id, true)}>Approve</button><button className="button button-soft button-small" onClick={() => setSalonApproval(salon.id, false)}>Keep pending</button></div></div>)}<LoadMoreButton shown={pendingSalonList.visibleItems.length} total={pendingSalons.length} onClick={pendingSalonList.loadMore} label="salon applications" /></div>
             <AdminManagement
               customers={adminCustomers}
               salons={adminSalons}
+              onConfirm={requestConfirmation}
               onChanged={() => {
                 loadSalons();
                 loadReport();
@@ -2505,7 +2844,7 @@ function App() {
           </section>
         )}
 
-        {reportPathForOwner && <section className="dashboard-section owner-report"><div className="section-heading"><div><span className="eyebrow">Your ledger</span><h2>Sales &amp; activity</h2></div><div className="report-controls"><select value={period} onChange={(event) => setPeriod(event.target.value)}><option value="day">Today</option><option value="week">This week</option><option value="month">This month</option><option value="year">This year</option></select><select value={reportSalon} onChange={(event) => setReportSalon(event.target.value)}><option value="">All my salons</option>{reportSalons.map((salon) => <option value={salon.id} key={salon.id}>{salon.name}</option>)}</select><select value={serviceCategory} onChange={(event) => setServiceCategory(event.target.value)}><option value="">All services</option>{reportCategories.map((category) => <option value={category} key={category}>{category}</option>)}</select><button className="button button-soft" onClick={clearReportFilters} disabled={!reportSalon && !serviceCategory}>Clear filters</button><button className="button button-soft" onClick={downloadReport}>↓ Export CSV</button></div></div><ReportCards report={report} /><div className="panel-box report-breakdown"><h3>Service performance</h3>{report?.services?.map((service) => <div className="report-row" key={service.category}><span>{service.category}<small>{service.orders} services booked</small></span><strong>{money(service.revenue)}</strong></div>)}</div></section>}
+        {reportPathForOwner && page === 'salon' && <section className="dashboard-section owner-report"><div className="section-heading"><div><span className="eyebrow">Your ledger</span><h2>Sales &amp; activity</h2></div><div className="report-controls"><select value={period} onChange={(event) => setPeriod(event.target.value)}><option value="day">Today</option><option value="week">This week</option><option value="month">This month</option><option value="year">This year</option></select><select value={reportSalon} onChange={(event) => setReportSalon(event.target.value)}><option value="">All my salons</option>{reportSalons.map((salon) => <option value={salon.id} key={salon.id}>{salon.name}</option>)}</select><select value={serviceCategory} onChange={(event) => setServiceCategory(event.target.value)}><option value="">All services</option>{reportCategories.map((category) => <option value={category} key={category}>{category}</option>)}</select><button className="button button-soft" onClick={clearReportFilters} disabled={!reportSalon && !serviceCategory}>Clear filters</button><button className="button button-soft" onClick={downloadReport}>↓ Export CSV</button></div></div><ReportCards report={report} /><div className="panel-box report-breakdown"><h3>Service performance</h3>{reportServiceList.visibleItems.map((service) => <div className="report-row" key={service.category}><span>{service.category}<small>{service.orders} services booked</small></span><strong>{money(service.revenue)}</strong></div>)}<LoadMoreButton shown={reportServiceList.visibleItems.length} total={(report?.services || []).length} onClick={reportServiceList.loadMore} label="service categories" /></div></section>}
           </>
         )}
       </main>
@@ -2522,8 +2861,25 @@ function App() {
         <span className="footer-copyright">© {new Date().getFullYear()} SalonFlow</span>
       </footer>
       {toast && <div className="toast" role="status">{toast}</div>}
+      <ConfirmationDialog confirmation={confirmation} onResolve={resolveConfirmation} />
+      {nonRefundableNoticeOpen && <div className="dialog-backdrop booking-payment-notice-backdrop" role="presentation" onMouseDown={(event) => {
+        if (event.target === event.currentTarget) setNonRefundableNoticeOpen(false);
+      }}>
+        <section className="auth-dialog booking-payment-notice" role="alertdialog" aria-modal="true" aria-labelledby="non-refundable-title" aria-describedby="non-refundable-description">
+          <h2 id="non-refundable-title">Before you pay</h2>
+          <p id="non-refundable-description">The {money(advanceAmount)} booking advance is non-refundable.</p>
+          <div className="booking-payment-notice-actions">
+            <button className="button button-soft" type="button" onClick={() => setNonRefundableNoticeOpen(false)}>Go back</button>
+            <button className="button button-primary" type="button" onClick={() => {
+              setNonRefundableNoticeOpen(false);
+              bookNow();
+            }}>Continue to payment</button>
+          </div>
+        </section>
+      </div>}
       {upiPayment && <UpiPaymentDialog booking={upiPayment.booking} payment={upiPayment.payment} onClose={() => setUpiPayment(null)} onSubmitReference={submitUpiReference} />}
       {authOpen && <AuthDialog onClose={() => setAuthOpen(false)} onSignedIn={(nextUser) => { setUser(nextUser); setPage(authReturnPage); notify(`Welcome, ${nextUser.name}.`); }} notify={notify} />}
+      {bootLoaderVisible && <div className="global-loader" role="status" aria-label="Loading SalonFlow" />}
     </div>
   );
 }
