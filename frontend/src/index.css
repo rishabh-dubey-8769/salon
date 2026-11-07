@@ -512,6 +512,38 @@ a { color: inherit; text-decoration: none; }
   box-shadow: 0 7px 15px rgba(181, 54, 75, .18), inset 0 1px 0 rgba(255,255,255,.9);
 }
 .profile-details { max-width: 860px; padding: 25px; }
+.admin-announcement-manager { max-width: 1000px; margin: 0 auto 24px; padding: 24px; }
+.admin-announcement-manager > .muted { margin: -12px 0 18px; font-size: .8rem; }
+.admin-announcement-open-form { margin-top: 1px; }
+.admin-announcement-form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+.admin-announcement-form > label { display: grid; gap: 7px; color: #6e6761; font-size: .75rem; font-weight: 700; }
+.admin-announcement-form > label:nth-child(2) { grid-column: 1 / -1; }
+.admin-announcement-form select, .admin-announcement-form textarea, .admin-announcement-datetime input { width: 100%; min-height: 42px; padding: 9px 11px; border: 1px solid #e6dbe7; border-radius: 10px; color: #302638; background: #fffefe; font: inherit; font-size: .84rem; }
+.admin-announcement-form textarea { min-height: 100px; resize: vertical; }
+.admin-announcement-datetime { display: grid; grid-column: 1 / -1; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.admin-announcement-datetime label { display: grid; gap: 7px; color: #6e6761; font-size: .75rem; font-weight: 700; }
+.admin-announcement-expiry { grid-column: 1 / -1; margin: -5px 0 0; }
+.admin-announcement-form-actions { display: flex; flex-wrap: wrap; grid-column: 1 / -1; gap: 9px; }
+.admin-announcement-list { display: grid; gap: 12px; margin-top: 24px; }
+.admin-announcement-list h3 { margin: 0; font: 750 1rem Manrope, sans-serif; }
+.admin-announcement-card { display: flex; justify-content: space-between; gap: 16px; padding: 15px; border: 1px solid #eee5de; border-radius: 13px; background: #fffefa; }
+.admin-announcement-card-copy { min-width: 0; }
+.admin-announcement-card-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 9px; color: #81776f; font-size: .72rem; }
+.admin-announcement-card-copy p { margin: 10px 0 7px; color: #403743; font-size: .85rem; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
+.admin-announcement-card-copy small { color: #8d837e; font-size: .7rem; }
+.admin-announcement-card-actions { display: flex; flex: none; align-items: center; gap: 8px; }
+.admin-announcement-banner, .admin-announcement-teaser { width: 100%; display: flex; align-items: center; gap: 13px; margin: 0; padding: 13px 18px; border: 0; border-bottom: 1px solid #f0d7a4; color: #57431e; background: linear-gradient(100deg, #fff4d8, #fff9eb 58%, #fff2df); text-align: left; }
+.admin-announcement-banner > div, .admin-announcement-teaser > span:nth-child(2) { min-width: 0; flex: 1; }
+.admin-announcement-banner strong, .admin-announcement-teaser strong { display: block; color: #715013; font-size: .83rem; font-weight: 800; }
+.admin-announcement-banner p { margin: 4px 0 0; color: #5b4b30; font-size: .84rem; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }
+.announcement-alert-symbol { flex: none; color: #c46c13; font-size: 1.25rem; font-weight: 900; animation: announcement-alert-pulse 1.2s ease-in-out infinite; }
+.admin-announcement-teaser { cursor: pointer; }
+.admin-announcement-teaser:hover { background: linear-gradient(100deg, #ffeab8, #fff4dc 58%, #ffe9c9); }
+.admin-announcement-teaser small { display: block; margin-top: 3px; color: #806b46; font-size: .75rem; }
+.announcement-teaser-arrow { flex: none; color: #946421; font-size: 1.15rem; }
+.announcement-load-error { padding: 9px 14px; color: #8d3f32; background: #fff1ed; font-size: .76rem; }
+@keyframes announcement-alert-pulse { 50% { opacity: .35; transform: scale(.88); } }
+@media (prefers-reduced-motion: reduce) { .announcement-alert-symbol { animation: none; } }
 .profile-photo-row { display: flex; align-items: center; gap: 19px; padding-bottom: 23px; border-bottom: 1px solid #f1ebe6; }
 .profile-photo { width: 90px; height: 90px; flex: none; overflow: hidden; display: grid; place-items: center; border: 3px solid white; border-radius: 50%; color: #a64e37; background: #ffe9dc; box-shadow: 0 0 0 1px #f0cbb9; font: 800 1.5rem Manrope, sans-serif; }
 .profile-photo img { width: 100%; height: 100%; border-radius: 50%; object-fit: cover; }
@@ -1221,6 +1253,14 @@ body {
 @media (max-width: 390px) {
   .topbar .nav { gap: 4px; }
   .topbar .nav > a { padding: 6px 8px; font-size: .67rem; }
+}
+
+@media (max-width: 760px) {
+  .admin-announcement-manager { padding: 19px; }
+  .admin-announcement-form, .admin-announcement-datetime { grid-template-columns: 1fr; }
+  .admin-announcement-card { flex-direction: column; }
+  .admin-announcement-card-actions { justify-content: flex-start; }
+  .admin-announcement-banner, .admin-announcement-teaser { padding: 12px; }
 }
 
 .topbar {
