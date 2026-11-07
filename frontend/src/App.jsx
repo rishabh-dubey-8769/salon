@@ -41,6 +41,15 @@ const formatAppointmentDate = (value) => {
   });
 };
 const LIST_PAGE_SIZE = 10;
+const PAGE_HASHES = {
+  home: '#home',
+  orders: '#orders',
+  admin: '#dashboard',
+  salon: '#owner',
+  profile: '#profile',
+};
+const HASH_PAGES = Object.fromEntries(Object.entries(PAGE_HASHES).map(([page, hash]) => [hash, page]));
+const getPageFromLocation = () => HASH_PAGES[window.location.hash] || 'home';
 const SALON_SERVICES = [
   { name: 'Haircut', category: 'Haircut' },
   { name: 'Beard trim', category: 'Beard & Shave' },
@@ -1736,6 +1745,128 @@ function AdminManagement({ customers = [], salons = [], onChanged, onConfirm }) 
   );
 }
 
+async function prepareContactImage(file) {
+  if (!file.type.startsWith('image/')) throw new Error('Choose an image file to attach.');
+  if (file.size > 10 * 1024 * 1024) throw new Error('Choose an image smaller than 10 MB.');
+
+  const imageUrl = URL.createObjectURL(file);
+  try {
+    const image = new Image();
+    image.src = imageUrl;
+    await image.decode();
+    let scale = Math.min(1, 1600 / Math.max(image.naturalWidth, image.naturalHeight));
+
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.max(1, Math.round(image.naturalWidth * scale));
+      canvas.height = Math.max(1, Math.round(image.naturalHeight * scale));
+      canvas.getContext('2d').drawImage(image, 0, 0, canvas.width, canvas.height);
+      const dataUrl = canvas.toDataURL('image/jpeg', Math.max(0.45, 0.82 - attempt * 0.06));
+      if (dataUrl.length <= 1_200_000) return dataUrl;
+      scale *= 0.78;
+    }
+    throw new Error('This image is too large to attach. Choose a smaller image.');
+  } finally {
+    URL.revokeObjectURL(imageUrl);
+  }
+}
+
+function ContactAdminDialog({ user, onClose, onSent }) {
+  const [message, setMessage] = useState('');
+  const [attachment, setAttachment] = useState('');
+  const [attachmentName, setAttachmentName] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const issueType = user.role === 'owner' ? 'Salon Owner Issue' : 'Customer issue';
+  const busyRef = useRef(busy);
+  const onCloseRef = useRef(onClose);
+  busyRef.current = busy;
+  onCloseRef.current = onClose;
+
+  useEffect(() => {
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    const handleKeyDown = (event) => {
+      if (event.key === 'Escape' && !busyRef.current) onCloseRef.current();
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      window.removeEventListener('keydown', handleKeyDown);
+    };
+  }, []);
+
+  const selectImage = async (event) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    setError('');
+    try {
+      setAttachment(await prepareContactImage(file));
+      setAttachmentName(file.name);
+    } catch (imageError) {
+      setAttachment('');
+      setAttachmentName('');
+      setError(imageError.message);
+    }
+    event.target.value = '';
+  };
+
+  const submit = async (event) => {
+    event.preventDefault();
+    setError('');
+    setBusy(true);
+    try {
+      const result = await api('/api/contact', {
+        method: 'POST',
+        body: JSON.stringify({
+          message,
+          ...(attachment ? { attachment: { dataUrl: attachment } } : {}),
+        }),
+      });
+      onSent(result.message);
+    } catch (requestError) {
+      setError(requestError.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="dialog-backdrop auth-dialog-backdrop" role="presentation" onMouseDown={(event) => {
+      if (event.target === event.currentTarget && !busy) onClose();
+    }}>
+      <section className="auth-dialog contact-dialog" role="dialog" aria-modal="true" aria-labelledby="contact-admin-title">
+        <button className="icon-button dialog-close close-control" type="button" onClick={onClose} disabled={busy} aria-label="Close dialog">×</button>
+        <span className="eyebrow">SalonFlow support</span>
+        <h2 id="contact-admin-title">Contact admin</h2>
+        <p className="muted">Your message will be sent securely to the SalonFlow admin.</p>
+        <form className="contact-admin-form" onSubmit={submit}>
+          <label>
+            Subject
+            <input value={issueType} readOnly aria-readonly="true" />
+          </label>
+          <label>
+            Your issue or feedback
+            <textarea value={message} onChange={(event) => setMessage(event.target.value)} maxLength={5000} rows={5} required disabled={busy} placeholder="Describe the issue or feedback…" />
+          </label>
+          <div className="contact-admin-upload">
+            <label className="button button-soft button-small" htmlFor="contact-admin-image">＋ Attach screenshot or image</label>
+            <input id="contact-admin-image" type="file" accept="image/*" onChange={selectImage} disabled={busy} />
+            {attachmentName && <span className="fine-print" title={attachmentName}>{attachmentName}</span>}
+            {attachment && <button className="text-button" type="button" disabled={busy} onClick={() => { setAttachment(''); setAttachmentName(''); }}>Remove image</button>}
+          </div>
+          {attachment && <img className="contact-admin-preview" src={attachment} alt="Screenshot attachment preview" />}
+          {error && <p className="form-error" role="alert">{error}</p>}
+          <div className="contact-admin-actions">
+            <button className="button button-soft" type="button" onClick={onClose} disabled={busy}>Cancel</button>
+            <button className="button button-primary" type="submit" disabled={busy || !message.trim()}>{busy ? 'Sending…' : 'Send message'}</button>
+          </div>
+        </form>
+      </section>
+    </div>
+  );
+}
+
 function AuthDialog({ onClose, onSignedIn, notify }) {
   const [mode, setMode] = useState('login');
   const [accountType, setAccountType] = useState('user');
@@ -2131,7 +2262,7 @@ function App() {
   const [selectedSalon, setSelectedSalon] = useState(null);
   const [bookingPanelOpen, setBookingPanelOpen] = useState(false);
   const [user, setUser] = useState(null);
-  const [page, setPage] = useState('home');
+  const [page, setPage] = useState(getPageFromLocation);
   const [search, setSearch] = useState('');
   const [openOnly, setOpenOnly] = useState(false);
   const [maxWait, setMaxWait] = useState('');
@@ -2154,6 +2285,7 @@ function App() {
   const confirmationResolverRef = useRef(null);
   const [authOpen, setAuthOpen] = useState(false);
   const [authReturnPage, setAuthReturnPage] = useState('profile');
+  const [contactAdminOpen, setContactAdminOpen] = useState(false);
   const [toast, setToast] = useState('');
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
@@ -2187,6 +2319,7 @@ function App() {
   const salonRequestIdRef = useRef(0);
   const bookingTriggerRef = useRef(null);
   const bookingCloseRef = useRef(null);
+  const contactAfterAuthRef = useRef(false);
   const toastTimerRef = useRef(null);
   const requestedSalonIdRef = useRef(new URLSearchParams(window.location.search).get('salon') || '');
   const [salonQr, setSalonQr] = useState(null);
@@ -2247,6 +2380,36 @@ function App() {
     window.clearTimeout(toastTimerRef.current);
     toastTimerRef.current = window.setTimeout(() => setToast(''), 3500);
   }, []);
+
+  const openAdminContact = () => {
+    if (!user) {
+      contactAfterAuthRef.current = true;
+      setAuthReturnPage(page);
+      setAuthOpen(true);
+      return;
+    }
+    if (!['user', 'owner'].includes(user.role)) {
+      notify('Contact admin is available to customer and salon owner accounts.');
+      return;
+    }
+    setContactAdminOpen(true);
+  };
+
+  const closeAuth = () => {
+    contactAfterAuthRef.current = false;
+    setAuthOpen(false);
+  };
+
+  const handleSignedIn = (nextUser) => {
+    setUser(nextUser);
+    setPage(authReturnPage);
+    notify(`Welcome, ${nextUser.name}.`);
+    if (contactAfterAuthRef.current) {
+      contactAfterAuthRef.current = false;
+      if (['user', 'owner'].includes(nextUser.role)) setContactAdminOpen(true);
+      else notify('Contact admin is available to customer and salon owner accounts.');
+    }
+  };
 
   const requestConfirmation = useCallback((options) => new Promise((resolve) => {
     confirmationResolverRef.current = resolve;
@@ -2420,6 +2583,21 @@ function App() {
       .catch(() => {})
       .finally(() => setSessionReady(true));
   }, []);
+
+  useEffect(() => {
+    const expectedHash = PAGE_HASHES[page];
+    if (window.location.hash === expectedHash) return;
+    window.history.replaceState(window.history.state, '', `${window.location.pathname}${window.location.search}${expectedHash}`);
+  }, [page]);
+
+  useEffect(() => {
+    if (!sessionReady) return;
+    const pageAllowed = page === 'home' ||
+      (Boolean(user) && (page === 'orders' || page === 'profile')) ||
+      (page === 'salon' && user?.role === 'owner') ||
+      (page === 'admin' && user?.role === 'admin');
+    if (!pageAllowed) setPage('home');
+  }, [page, sessionReady, user]);
 
   useEffect(() => {
     if (!salonsReady || !sessionReady) return undefined;
@@ -3191,15 +3369,19 @@ function App() {
           <a className="brand" href="#home" onClick={() => setPage('home')}><span className="brand-mark">S</span>SalonFlow</a>
           <p>A little more time for the things you love.</p>
         </div>
-        <a className="footer-contact" href="mailto:sudhanshushekhar1696@gmail.com">
+        <button className="footer-contact" type="button" onClick={openAdminContact}>
           <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="5.5" width="17" height="13" rx="2.5" /><path d="m5 7 7 5.5L19 7" /></svg>
           <span>Contact admin</span>
-        </a>
+        </button>
         <span className="footer-copyright">© {new Date().getFullYear()} SalonFlow</span>
       </footer>
       {toast && <div className="toast" role="status">{toast}</div>}
       <ConfirmationDialog confirmation={confirmation} onResolve={resolveConfirmation} />
       {salonQr && <SalonQrDialog salon={salonQr} onClose={() => setSalonQr(null)} />}
+      {contactAdminOpen && user && <ContactAdminDialog user={user} onClose={() => setContactAdminOpen(false)} onSent={(message) => {
+        setContactAdminOpen(false);
+        notify(message);
+      }} />}
       {busy && !upiPayment && <div className="payment-preparing-backdrop" role="status" aria-live="polite">
         <div className="payment-preparing-card">
           <span className="payment-loader-spinner" aria-hidden="true" />
@@ -3223,7 +3405,7 @@ function App() {
         </section>
       </div>}
       {upiPayment && <UpiPaymentDialog booking={upiPayment.booking} payment={upiPayment.payment} onClose={() => setUpiPayment(null)} onSubmitReference={submitUpiReference} />}
-      {authOpen && <AuthDialog onClose={() => setAuthOpen(false)} onSignedIn={(nextUser) => { setUser(nextUser); setPage(authReturnPage); notify(`Welcome, ${nextUser.name}.`); }} notify={notify} />}
+      {authOpen && <AuthDialog onClose={closeAuth} onSignedIn={handleSignedIn} notify={notify} />}
       {bootLoaderVisible && <div className="global-loader" role="status" aria-label="Loading SalonFlow" />}
     </div>
   );
