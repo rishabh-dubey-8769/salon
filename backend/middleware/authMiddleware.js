@@ -25,6 +25,24 @@ const protect = async (req, res, next) => {
   }
 };
 
+const optionalProtect = async (req, _res, next) => {
+  const authorization = req.headers.authorization;
+  const token = authorization?.startsWith('Bearer ')
+    ? authorization.slice(7)
+    : req.cookies.token;
+  if (!token) return next();
+
+  try {
+    const payload = jwt.verify(token, process.env.JWT_SECRET);
+    const user = await User.findById(payload.sub);
+    if (user?.isActive) req.user = user;
+    return next();
+  } catch (error) {
+    if (error.name === 'JsonWebTokenError' || error.name === 'TokenExpiredError') return next();
+    return next(error);
+  }
+};
+
 const requireRole = (...roles) => (req, res, next) => {
   if (!req.user || !roles.includes(req.user.role)) {
     return res.status(403).json({ success: false, message: 'You do not have permission to perform this action.' });
@@ -32,4 +50,4 @@ const requireRole = (...roles) => (req, res, next) => {
   return next();
 };
 
-module.exports = { protect, requireRole };
+module.exports = { protect, optionalProtect, requireRole };
