@@ -20,6 +20,12 @@ const {
   rejectManagedBookingPayment,
 } = require('../controllers/adminController');
 const { protect, requireRole } = require('../middleware/authMiddleware');
+const {
+  listAdminAnnouncements,
+  createAnnouncement,
+  updateAnnouncement,
+  deleteAnnouncement,
+} = require('../controllers/announcementController');
 
 const router = express.Router();
 router.use(protect, requireRole('admin'));
@@ -42,5 +48,9 @@ router.get('/management/bookings', getManagedBookings);
 router.patch('/management/bookings/:id/status', updateManagedBookingStatus);
 router.patch('/management/bookings/:id/payment-confirmation', confirmManagedBookingPayment);
 router.patch('/management/bookings/:id/payment-rejection', rejectManagedBookingPayment);
+router.get('/announcements', listAdminAnnouncements);
+router.post('/announcements', createAnnouncement);
+router.patch('/announcements/:id', updateAnnouncement);
+router.delete('/announcements/:id', deleteAnnouncement);
 
 module.exports = router;
