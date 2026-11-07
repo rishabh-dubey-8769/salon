@@ -10,6 +10,7 @@ const salonRoutes = require('./routes/salonRoutes');
 const bookingRoutes = require('./routes/bookingRoutes');
 const adminRoutes = require('./routes/adminRoutes');
 const contactRoutes = require('./routes/contactRoutes');
+const announcementRoutes = require('./routes/announcementRoutes');
 const { errorHandler, notFound } = require('./middleware/errorHandler');
 
 const app = express();
@@ -59,6 +60,7 @@ app.use('/api/salons', salonRoutes);
 app.use('/api/bookings', bookingRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/contact', contactRoutes);
+app.use('/api/announcements', announcementRoutes);
 app.use(notFound);
 app.use(errorHandler);
 
