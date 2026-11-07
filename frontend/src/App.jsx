@@ -143,6 +143,14 @@ function LoadMoreButton({ shown, total, onClick, label = 'items' }) {
   );
 }
 
+function BackArrowButton({ onClick, label = 'Back to home', className = '' }) {
+  return (
+    <button className={`text-button back-navigation ${className}`.trim()} type="button" onClick={onClick} aria-label={label} title={label}>
+      <svg className="back-navigation-icon" viewBox="0 0 32 24" aria-hidden="true"><path d="M13 3 3 12l10 9M4 12h25" /></svg>
+    </button>
+  );
+}
+
 function ConfirmationDialog({ confirmation, onResolve }) {
   useEffect(() => {
     if (!confirmation) return undefined;
@@ -254,6 +262,189 @@ function MapsLocateLink({ salon, location, className = '', stopPropagation = fal
       </svg>
       <span>Locate</span>
     </a>
+  );
+}
+
+function getSalonProfileUrl(salonId) {
+  const url = new URL(window.location.pathname, window.location.origin);
+  url.searchParams.set('salon', salonId);
+  url.hash = 'home';
+  return url.toString();
+}
+
+function loadCardImage(source) {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    if (!source.startsWith('data:')) image.crossOrigin = 'anonymous';
+    image.onload = () => resolve(image);
+    image.onerror = () => reject(new Error('The salon logo could not be loaded for the visiting card. Check the image URL or upload the logo again.'));
+    image.src = source;
+  });
+}
+
+function roundCanvasRect(context, x, y, width, height, radius) {
+  context.beginPath();
+  context.roundRect(x, y, width, height, radius);
+}
+
+async function createSalonVisitingCard(salon) {
+  const width = 1200;
+  const height = 675;
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  const context = canvas.getContext('2d');
+  if (!context) throw new Error('Your browser could not prepare the visiting card image.');
+
+  const cardGradient = context.createLinearGradient(0, 0, width, height);
+  cardGradient.addColorStop(0, '#fffaf7');
+  cardGradient.addColorStop(0.55, '#fffdfd');
+  cardGradient.addColorStop(1, '#f5efff');
+  context.fillStyle = cardGradient;
+  context.fillRect(0, 0, width, height);
+
+  const borderGradient = context.createLinearGradient(0, 0, width, height);
+  borderGradient.addColorStop(0, '#df5d8a');
+  borderGradient.addColorStop(0.5, '#a35ac1');
+  borderGradient.addColorStop(1, '#6478d4');
+  context.strokeStyle = borderGradient;
+  context.lineWidth = 8;
+  roundCanvasRect(context, 4, 4, width - 8, height - 8, 38);
+  context.stroke();
+
+  context.fillStyle = '#b44476';
+  context.font = '800 30px Arial, sans-serif';
+  context.fillText('SALONFLOW', 86, 90);
+  context.fillStyle = '#857588';
+  context.font = '600 19px Arial, sans-serif';
+  context.fillText('SCAN TO VIEW SALON PROFILE', 86, 126);
+
+  const logoX = 86;
+  const logoY = 190;
+  const logoSize = 142;
+  if (salon.image) {
+    const logo = await loadCardImage(salon.image);
+    context.save();
+    roundCanvasRect(context, logoX, logoY, logoSize, logoSize, 28);
+    context.clip();
+    const scale = Math.max(logoSize / logo.naturalWidth, logoSize / logo.naturalHeight);
+    const drawnWidth = logo.naturalWidth * scale;
+    const drawnHeight = logo.naturalHeight * scale;
+    context.drawImage(logo, logoX + (logoSize - drawnWidth) / 2, logoY + (logoSize - drawnHeight) / 2, drawnWidth, drawnHeight);
+    context.restore();
+  } else {
+    const logoGradient = context.createLinearGradient(logoX, logoY, logoX + logoSize, logoY + logoSize);
+    logoGradient.addColorStop(0, '#dc4d83');
+    logoGradient.addColorStop(1, '#7555c7');
+    context.fillStyle = logoGradient;
+    roundCanvasRect(context, logoX, logoY, logoSize, logoSize, 28);
+    context.fill();
+    context.fillStyle = '#fff';
+    context.font = '800 66px Arial, sans-serif';
+    context.textAlign = 'center';
+    context.textBaseline = 'middle';
+    context.fillText(String(salon.name || 'S').trim().charAt(0).toUpperCase(), logoX + logoSize / 2, logoY + logoSize / 2);
+    context.textAlign = 'left';
+    context.textBaseline = 'alphabetic';
+  }
+
+  const textX = 270;
+  const textWidth = 445;
+  let nameFontSize = 54;
+  context.font = `800 ${nameFontSize}px Arial, sans-serif`;
+  while (context.measureText(salon.name).width > textWidth && nameFontSize > 34) {
+    nameFontSize -= 2;
+    context.font = `800 ${nameFontSize}px Arial, sans-serif`;
+  }
+  context.fillStyle = '#2c1e30';
+  context.textBaseline = 'alphabetic';
+  context.fillText(salon.name || 'Salon', textX, 242, textWidth);
+
+  context.fillStyle = '#a34577';
+  context.font = '700 22px Arial, sans-serif';
+  context.fillText('AREA', textX, 300);
+  context.fillStyle = '#514857';
+  context.font = '500 25px Arial, sans-serif';
+  const areaLines = [salon.address, salon.city].filter(Boolean);
+  areaLines.slice(0, 2).forEach((line, index) => context.fillText(line, textX, 342 + index * 36, textWidth));
+  if (salon.pinCode) {
+    context.fillStyle = '#a34577';
+    context.font = '700 22px Arial, sans-serif';
+    context.fillText('PIN CODE', textX, 440);
+    context.fillStyle = '#514857';
+    context.font = '600 25px Arial, sans-serif';
+    context.fillText(String(salon.pinCode), textX, 477);
+  }
+
+  const qrDataUrl = await QRCode.toDataURL(getSalonProfileUrl(salon.id), {
+    width: 360,
+    margin: 3,
+    errorCorrectionLevel: 'H',
+    color: { dark: '#321f37', light: '#ffffff' },
+  });
+  const qrImage = await loadCardImage(qrDataUrl);
+  const qrX = 790;
+  const qrY = 154;
+  const qrSize = 330;
+  context.fillStyle = '#fff';
+  context.shadowColor = 'rgba(57, 34, 64, .16)';
+  context.shadowBlur = 24;
+  context.shadowOffsetY = 8;
+  roundCanvasRect(context, qrX - 18, qrY - 18, qrSize + 36, qrSize + 36, 24);
+  context.fill();
+  context.shadowColor = 'transparent';
+  context.shadowBlur = 0;
+  context.shadowOffsetY = 0;
+  context.drawImage(qrImage, qrX, qrY, qrSize, qrSize);
+  context.fillStyle = '#75406e';
+  context.font = '800 20px Arial, sans-serif';
+  context.textAlign = 'center';
+  context.fillText('SCAN TO OPEN THIS SALON', qrX + qrSize / 2, 552);
+
+  return new Promise((resolve, reject) => {
+    canvas.toBlob((blob) => {
+      if (!blob) {
+        reject(new Error('The visiting card image could not be downloaded.'));
+        return;
+      }
+      resolve(blob);
+    }, 'image/png');
+  });
+}
+
+function SalonVisitingCardButton({ salon }) {
+  const [downloading, setDownloading] = useState(false);
+  const [error, setError] = useState('');
+
+  const download = async (event) => {
+    event.stopPropagation();
+    setDownloading(true);
+    setError('');
+    try {
+      const blob = await createSalonVisitingCard(salon);
+      const downloadUrl = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = downloadUrl;
+      link.download = `${String(salon.name || 'salon').toLowerCase().replace(/[^a-z0-9]+/g, '-')}-visiting-card.png`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.setTimeout(() => URL.revokeObjectURL(downloadUrl), 1000);
+    } catch (downloadError) {
+      setError(downloadError.message);
+    } finally {
+      setDownloading(false);
+    }
+  };
+
+  return (
+    <div className="salon-visiting-card-action">
+      <button className="salon-visiting-card-button" type="button" onClick={download} disabled={downloading} aria-label={`Download ${salon.name} visiting card`}>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v11m0 0 4-4m-4 4-4-4M5 15v4h14v-4" /></svg>
+        {downloading ? 'Preparing card…' : 'Download visiting card'}
+      </button>
+      {error && <span className="salon-visiting-card-error" role="alert">{error}</span>}
+    </div>
   );
 }
 
@@ -550,7 +741,7 @@ function UpiPaymentDialog({ booking, payment, onClose, onSubmitReference }) {
   );
 }
 
-function OrdersHistoryPage({ user }) {
+function OrdersHistoryPage({ user, onBack }) {
   const [bookings, setBookings] = useState([]);
   const [fromDate, setFromDate] = useState('');
   const [toDate, setToDate] = useState('');
@@ -622,9 +813,9 @@ function OrdersHistoryPage({ user }) {
 
   return (
     <section className="orders-history-page">
-      <div className="profile-page-heading">
-        <div>
-          <span className="eyebrow">Bookings and orders</span>
+      <div className="orders-history-heading-row">
+        <BackArrowButton onClick={onBack} className="section-back-navigation" />
+        <div className="orders-history-title">
           <h1>Orders &amp; history</h1>
           <p className="muted">
             {user.role === 'admin'
@@ -634,6 +825,7 @@ function OrdersHistoryPage({ user }) {
                 : 'Your salon bookings, newest first.'}
           </p>
         </div>
+        <span aria-hidden="true" />
       </div>
 
       <div className="panel-box orders-history-filters" aria-label="Filter booking history">
@@ -733,6 +925,8 @@ function SalonProfilePage({ salons, loaded, onRefresh, onSalonChanged, onBack, o
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   const [message, setMessage] = useState('');
+  const [openStatusUpdating, setOpenStatusUpdating] = useState(false);
+  const [openStatusTarget, setOpenStatusTarget] = useState(null);
 
   const selectedSalon = salons.find((salon) => salon.id === selectedId);
   const serviceList = useLoadMore(draft.services, `${creating}:${selectedId}`);
@@ -829,7 +1023,9 @@ function SalonProfilePage({ salons, loaded, onRefresh, onSalonChanged, onBack, o
   };
 
   const changeOpenStatus = async (isOpen) => {
-    if (!selectedSalon) return;
+    if (!selectedSalon || openStatusUpdating) return;
+    setOpenStatusUpdating(true);
+    setOpenStatusTarget(isOpen);
     setError('');
     try {
       const result = await api(`/api/salons/mine/${selectedSalon.id}/open`, {
@@ -841,6 +1037,9 @@ function SalonProfilePage({ salons, loaded, onRefresh, onSalonChanged, onBack, o
       setMessage(result.message || `Salon marked ${isOpen ? 'open' : 'closed'}.`);
     } catch (requestError) {
       setError(requestError.message);
+    } finally {
+      setOpenStatusUpdating(false);
+      setOpenStatusTarget(null);
     }
   };
 
@@ -870,10 +1069,10 @@ function SalonProfilePage({ salons, loaded, onRefresh, onSalonChanged, onBack, o
           {!creating && selectedSalon && (
             <div className="salon-profile-status panel-box">
               <div><span className="eyebrow">Salon status</span><strong>{selectedSalon.isApproved ? 'Approved and listed' : 'Awaiting admin approval'}</strong></div>
-              <label className={`salon-status-toggle ${selectedSalon.isOpen ? 'is-open' : 'is-closed'}`} title={selectedSalon.isApproved ? 'Toggle salon open status' : 'Salon must be approved before opening'}>
-                <input type="checkbox" role="switch" aria-label="Salon open status" disabled={!selectedSalon.isApproved} checked={selectedSalon.isOpen} onChange={(event) => changeOpenStatus(event.target.checked)} />
+              <label className={`salon-status-toggle ${selectedSalon.isOpen ? 'is-open' : 'is-closed'} ${openStatusUpdating ? 'is-updating' : ''}`} title={selectedSalon.isApproved ? 'Toggle salon open status' : 'Salon must be approved before opening'} aria-busy={openStatusUpdating}>
+                <input type="checkbox" role="switch" aria-label="Salon open status" disabled={!selectedSalon.isApproved || openStatusUpdating} checked={selectedSalon.isOpen} onChange={(event) => changeOpenStatus(event.target.checked)} />
                 <span className="salon-status-track" aria-hidden="true"><span /></span>
-                <strong>{selectedSalon.isOpen ? 'Open' : 'Closed'}</strong>
+                <strong>{openStatusUpdating ? <><span className="salon-status-spinner" aria-hidden="true" />Updating {openStatusTarget ? 'open' : 'closed'}…</> : selectedSalon.isOpen ? 'Open' : 'Closed'}</strong>
               </label>
             </div>
           )}
@@ -1854,6 +2053,67 @@ export function RejectionFeedbackPage() {
   );
 }
 
+function SalonQrDialog({ salon, onClose }) {
+  const [qrCode, setQrCode] = useState('');
+  const [error, setError] = useState('');
+  const salonUrl = useMemo(() => getSalonProfileUrl(salon.id), [salon.id]);
+
+  useEffect(() => {
+    let active = true;
+    setQrCode('');
+    setError('');
+    QRCode.toDataURL(salonUrl, {
+      width: 320,
+      margin: 4,
+      errorCorrectionLevel: 'H',
+      color: { dark: '#63234f', light: '#fff7ed' },
+    })
+      .then((dataUrl) => {
+        if (active) setQrCode(dataUrl);
+      })
+      .catch((qrError) => {
+        if (active) setError(`Could not create this salon QR code: ${qrError.message}`);
+      });
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    const onKeyDown = (event) => {
+      if (event.key === 'Escape') onClose();
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => {
+      active = false;
+      document.body.style.overflow = previousOverflow;
+      window.removeEventListener('keydown', onKeyDown);
+    };
+  }, [onClose, salonUrl]);
+
+  const downloadName = `${salon.name.toLowerCase().replace(/[^a-z0-9]+/g, '-')}-salon-qr.png`;
+  const salonLocation = [salon.address, salon.city, salon.pinCode && `PIN ${salon.pinCode}`].filter(Boolean).join(' · ');
+
+  return (
+    <div className="dialog-backdrop salon-qr-backdrop" role="presentation" onMouseDown={(event) => {
+      if (event.target === event.currentTarget) onClose();
+    }}>
+      <section className="auth-dialog salon-qr-dialog" role="dialog" aria-modal="true" aria-labelledby="salon-qr-title">
+        <button className="icon-button close-control salon-qr-close" type="button" onClick={onClose} aria-label="Close salon QR code">×</button>
+        <span className="eyebrow">Share your salon</span>
+        <h2 id="salon-qr-title">{salon.name}</h2>
+        <p className="salon-qr-location">{salonLocation}</p>
+        <div className="salon-qr-image-frame">
+          {qrCode ? <img src={qrCode} alt={`QR code to open ${salon.name} on SalonFlow`} /> : error ? <p className="form-error" role="alert">{error}</p> : <p className="muted" role="status">Creating your salon QR code…</p>}
+        </div>
+        <p className="fine-print">Scan with a phone camera to open this salon’s profile on SalonFlow.</p>
+        <div className="salon-qr-actions">
+          <button className="button button-soft" type="button" onClick={onClose}>Close</button>
+          <a className={`button button-primary ${qrCode ? '' : 'is-disabled'}`} href={qrCode || undefined} download={downloadName} aria-disabled={!qrCode} onClick={(event) => {
+            if (!qrCode) event.preventDefault();
+          }}>↓ Download QR code</a>
+        </div>
+      </section>
+    </div>
+  );
+}
+
 function App() {
   const [salons, setSalons] = useState([]);
   const [salonImageIndexes, setSalonImageIndexes] = useState({});
@@ -1900,8 +2160,8 @@ function App() {
   const [adminSalons, setAdminSalons] = useState([]);
   const [adminCustomers, setAdminCustomers] = useState([]);
   const [ownerSalons, setOwnerSalons] = useState([]);
+  const [salonOpenUpdates, setSalonOpenUpdates] = useState({});
   const [ownerSalonsLoaded, setOwnerSalonsLoaded] = useState(false);
-  const [ownerSalonsRefreshing, setOwnerSalonsRefreshing] = useState(false);
   const [ownerSalonId, setOwnerSalonId] = useState('');
   const [queue, setQueue] = useState([]);
   const [blockedCustomers, setBlockedCustomers] = useState([]);
@@ -1922,6 +2182,8 @@ function App() {
   const bookingTriggerRef = useRef(null);
   const bookingCloseRef = useRef(null);
   const toastTimerRef = useRef(null);
+  const requestedSalonIdRef = useRef(new URLSearchParams(window.location.search).get('salon') || '');
+  const [salonQr, setSalonQr] = useState(null);
 
   const applyLocationFix = useCallback((position, userRequested = false) => {
     const candidate = {
@@ -2016,8 +2278,36 @@ function App() {
       const result = await api(`/api/salons?${params.toString()}`);
       if (requestId !== salonRequestIdRef.current) return;
       setSalons(result.salons);
-      setSelectedSalon((previous) => result.salons.find((salon) => salon.id === previous?.id) || result.salons[0] || null);
-      setError('');
+      const requestedSalonId = requestedSalonIdRef.current;
+      let linkedSalon = requestedSalonId && result.salons.find((salon) => salon.id === requestedSalonId);
+      if (requestedSalonId && !linkedSalon) {
+        try {
+          const salonResult = await api(`/api/salons/${encodeURIComponent(requestedSalonId)}`);
+          linkedSalon = salonResult.salon;
+        } catch (requestError) {
+          if (requestId === salonRequestIdRef.current) {
+            requestedSalonIdRef.current = '';
+            setError(requestError.message);
+            const url = new URL(window.location.href);
+            url.searchParams.delete('salon');
+            window.history.replaceState(window.history.state, '', `${url.pathname}${url.search}${url.hash}`);
+          }
+        }
+      }
+      if (requestId !== salonRequestIdRef.current) return;
+      if (linkedSalon) {
+        requestedSalonIdRef.current = '';
+        setSelectedSalon(linkedSalon);
+        setSelectedServices([]);
+        setPage('home');
+        setBookingPanelOpen(window.matchMedia('(max-width: 900px)').matches);
+        const url = new URL(window.location.href);
+        url.searchParams.delete('salon');
+        window.history.replaceState(window.history.state, '', `${url.pathname}${url.search}${url.hash}`);
+      } else if (!requestedSalonId) {
+        setSelectedSalon((previous) => result.salons.find((salon) => salon.id === previous?.id) || result.salons[0] || null);
+      }
+      if (linkedSalon || !requestedSalonId) setError('');
     } catch (requestError) {
       if (requestId === salonRequestIdRef.current) setError(requestError.message);
     } finally {
@@ -2093,7 +2383,6 @@ function App() {
 
   const loadOwnerSalons = useCallback(async () => {
     if (user?.role !== 'owner') return;
-    setOwnerSalonsRefreshing(true);
     try {
       const result = await api('/api/salons/mine');
       setOwnerSalons(result.salons);
@@ -2102,8 +2391,6 @@ function App() {
     } catch (requestError) {
       setOwnerSalonsLoaded(true);
       setError(requestError.message);
-    } finally {
-      setOwnerSalonsRefreshing(false);
     }
   }, [user]);
 
@@ -2325,6 +2612,13 @@ function App() {
   };
 
   const signOut = async () => {
+    const confirmed = await requestConfirmation({
+      title: 'Sign out?',
+      message: 'Are you sure you want to log out?',
+      confirmLabel: 'Sign out',
+      danger: true,
+    });
+    if (!confirmed) return;
     try {
       await api('/api/auth/logout', { method: 'POST' });
       setUser(null);
@@ -2470,6 +2764,8 @@ function App() {
   };
 
   const setSalonOpen = async (salon, isOpen) => {
+    if (salonOpenUpdates[salon.id]) return;
+    setSalonOpenUpdates((current) => ({ ...current, [salon.id]: true }));
     try {
       await api(`/api/salons/mine/${salon.id}/open`, {
         method: 'PATCH',
@@ -2479,6 +2775,12 @@ function App() {
       await loadSalons();
     } catch (requestError) {
       setError(requestError.message);
+    } finally {
+      setSalonOpenUpdates((current) => {
+        const next = { ...current };
+        delete next[salon.id];
+        return next;
+      });
     }
   };
 
@@ -2492,6 +2794,7 @@ function App() {
   const reportServiceList = useLoadMore(report?.services || [], JSON.stringify([reportSalon, reportCustomer, serviceCategory, period]));
   const bookingServiceList = useLoadMore(selectedSalon?.services || [], selectedSalon?.id || '');
   const reportSalons = user?.role === 'admin' ? adminSalons : ownerSalons;
+  const qrSalon = ownerSalons.find((salon) => salon.id === ownerSalonId) || ownerSalons[0] || null;
   const reportCategories = [...new Set([
     'Haircut',
     'Beard',
@@ -2550,7 +2853,7 @@ function App() {
 
       <main id="home">
         {page === 'orders' && user ? (
-          <OrdersHistoryPage key={`${user.id}-${user.role}`} user={user} />
+          <OrdersHistoryPage key={`${user.id}-${user.role}`} user={user} onBack={() => setPage('home')} />
         ) : page === 'profile' && user ? (
           user.role === 'owner' ? (
             <SalonProfilePage
@@ -2690,7 +2993,10 @@ function App() {
                     <p className="salon-address">{salon.address}, {salon.city}</p>
                     <div className="salon-metrics"><span>◷ {formatWaitDuration(salon.waitMinutes)} wait</span><span title={locationFixRef.current ? `Straight-line distance; location accuracy is about ±${Math.round(locationFixRef.current.accuracy)} m. Google Maps provides the road route distance.` : 'Straight-line distance; Google Maps provides the road route distance'}>{formatSalonDistance(salon.distanceKm, locationFixRef.current?.accuracy)}</span><span>{salon.queueCount} waiting</span></div>
                     <div className="service-tags">{salon.services.slice(0, 3).map((service) => <span key={service._id}>{service.name} · {money(service.price)}</span>)}</div>
-                    <MapsLocateLink salon={salon} location={location} stopPropagation />
+                    <div className="salon-card-quick-actions">
+                      <MapsLocateLink salon={salon} location={location} stopPropagation />
+                      <SalonVisitingCardButton salon={salon} />
+                    </div>
                   </div>
                 </article>
                 );
@@ -2738,7 +3044,27 @@ function App() {
 
         {user?.role === 'owner' && page === 'salon' && (
           <section className="dashboard-section" id="owner">
-            <div className="section-heading"><div><span className="eyebrow">Owner studio</span><h2>Your salon, in the moment</h2></div><button className="button button-soft" onClick={() => setShowSalonForm((visible) => !visible)}>{showSalonForm ? 'Close form' : '+ Add a salon'}</button></div>
+            <div className="owner-studio-heading">
+              <BackArrowButton onClick={() => setPage('home')} className="section-back-navigation" />
+              <strong className="owner-studio-title">Owner studio</strong>
+              <div className="owner-studio-actions">
+                <button
+                  className="salon-qr-top-button"
+                  type="button"
+                  onClick={() => qrSalon && setSalonQr(qrSalon)}
+                  disabled={!qrSalon?.isApproved}
+                  title={qrSalon?.isApproved ? `Create and download a QR code for ${qrSalon.name}` : 'A QR code is available after a salon is approved'}
+                  aria-label={qrSalon ? `Show QR code for ${qrSalon.name}` : 'Add a salon to create a QR code'}
+                >
+                  <svg className="salon-qr-top-icon" viewBox="0 0 32 32" aria-hidden="true">
+                    <path d="M3 3h10v10H3zM19 3h10v10H19zM3 19h10v10H3zM19 19h4v4h-4zM26 19h3v3h-3zM26 26h3v3h-3zM19 26h4v3h-4z" />
+                    <path d="M6 6h4v4H6zM22 6h4v4h-4zM6 22h4v4H6z" className="salon-qr-icon-cutout" />
+                  </svg>
+                  <span className="salon-qr-top-copy"><strong>Show QR</strong></span>
+                </button>
+                <button className="button button-soft" onClick={() => setShowSalonForm((visible) => !visible)}>{showSalonForm ? 'Close form' : '+ Add a salon'}</button>
+              </div>
+            </div>
             {showSalonForm && (
               <form className="salon-setup panel-box" onSubmit={createSalon}>
                 <h3>Submit a salon for approval</h3>
@@ -2755,14 +3081,14 @@ function App() {
             )}
             <div className="owner-grid">
               <div className="panel-box">
-                <div className="panel-title-row"><h3>Salon operations</h3><button className={`icon-button ${ownerSalonsRefreshing ? 'is-refreshing' : ''}`} onClick={loadOwnerSalons} disabled={ownerSalonsRefreshing} aria-label={ownerSalonsRefreshing ? 'Refreshing salons' : 'Refresh salons'} title={ownerSalonsRefreshing ? 'Refreshing…' : 'Refresh salons'}>↻</button></div>
+                <div className="panel-title-row"><h3>Salon operations</h3></div>
                 {!ownerSalons.length && <p className="muted">Add a salon to start managing its queue. New salons need admin approval before customers can book.</p>}
                 {ownerSalonList.visibleItems.map((salon) => <div className="owner-salon-row" key={salon.id}>
                   <div><strong>{salon.name}</strong><small>{salon.city} · {salon.isApproved ? 'Approved' : 'Awaiting approval'}</small></div>
-                  <label className={`salon-status-toggle ${salon.isOpen ? 'is-open' : 'is-closed'}`} title={salon.isApproved ? 'Toggle salon open status' : 'Salon must be approved before opening'}>
-                    <input type="checkbox" role="switch" aria-label={`${salon.name} open status`} disabled={!salon.isApproved} checked={salon.isOpen} onChange={(event) => setSalonOpen(salon, event.target.checked)} />
+                  <label className={`salon-status-toggle ${salon.isOpen ? 'is-open' : 'is-closed'} ${salonOpenUpdates[salon.id] ? 'is-updating' : ''}`} title={salon.isApproved ? 'Toggle salon open status' : 'Salon must be approved before opening'} aria-busy={Boolean(salonOpenUpdates[salon.id])}>
+                    <input type="checkbox" role="switch" aria-label={`${salon.name} open status`} disabled={!salon.isApproved || Boolean(salonOpenUpdates[salon.id])} checked={salon.isOpen} onChange={(event) => setSalonOpen(salon, event.target.checked)} />
                     <span className="salon-status-track" aria-hidden="true"><span /></span>
-                    <strong>{salon.isOpen ? 'Open' : 'Closed'}</strong>
+                    <strong>{salonOpenUpdates[salon.id] ? <><span className="salon-status-spinner" aria-hidden="true" />Updating…</> : salon.isOpen ? 'Open' : 'Closed'}</strong>
                   </label>
                 </div>)}
                 <LoadMoreButton shown={ownerSalonList.visibleItems.length} total={ownerSalons.length} onClick={ownerSalonList.loadMore} label="salons" />
@@ -2822,7 +3148,12 @@ function App() {
 
         {user?.role === 'admin' && page === 'admin' && (
           <section className="dashboard-section" id="dashboard">
-            <div className="section-heading"><div><span className="eyebrow">Platform overview</span><h2>SalonFlow at a glance</h2></div><div className="report-controls"><select value={period} onChange={(event) => setPeriod(event.target.value)}><option value="day">Today</option><option value="week">This week</option><option value="month">This month</option><option value="year">This year</option></select><SearchableAdminSelect label="Salon" showLabel={false} value={reportSalon} placeholder="All salons" options={[{ value: '', label: 'All salons' }, ...reportSalons.map((salon) => ({ value: salon.id, label: `${salon.name || 'Salon'}${salon.ownerName ? ` · ${salon.ownerName}` : ''}${salon.ownerEmail ? ` · ${salon.ownerEmail}` : ''}${salon.ownerUid ? ` · ${salon.ownerUid}` : ''}` }))]} onChange={setReportSalon} /><SearchableAdminSelect label="Customer" showLabel={false} value={reportCustomer} placeholder="All customers" options={[{ value: '', label: 'All customers' }, ...adminCustomers.map((customer) => ({ value: customer.id, label: `${customer.name || 'Customer'}${customer.email ? ` · ${customer.email}` : ''}${customer.uid ? ` · ${customer.uid}` : ''}` }))]} onChange={setReportCustomer} /><select value={serviceCategory} onChange={(event) => setServiceCategory(event.target.value)}><option value="">All services</option>{reportCategories.map((category) => <option value={category} key={category}>{category}</option>)}</select><button className="button button-soft" onClick={clearReportFilters} disabled={!reportSalon && !reportCustomer && !serviceCategory}>Clear filters</button><button className="button button-soft" onClick={downloadReport}>↓ Export CSV</button></div></div>
+            <div className="admin-dashboard-heading">
+              <BackArrowButton onClick={() => setPage('home')} className="section-back-navigation" />
+              <strong className="owner-studio-title">Admin dashboard</strong>
+              <span aria-hidden="true" />
+            </div>
+            <div className="report-controls admin-dashboard-controls"><select value={period} onChange={(event) => setPeriod(event.target.value)}><option value="day">Today</option><option value="week">This week</option><option value="month">This month</option><option value="year">This year</option></select><SearchableAdminSelect label="Salon" showLabel={false} value={reportSalon} placeholder="All salons" options={[{ value: '', label: 'All salons' }, ...reportSalons.map((salon) => ({ value: salon.id, label: `${salon.name || 'Salon'}${salon.ownerName ? ` · ${salon.ownerName}` : ''}${salon.ownerEmail ? ` · ${salon.ownerEmail}` : ''}${salon.ownerUid ? ` · ${salon.ownerUid}` : ''}` }))]} onChange={setReportSalon} /><SearchableAdminSelect label="Customer" showLabel={false} value={reportCustomer} placeholder="All customers" options={[{ value: '', label: 'All customers' }, ...adminCustomers.map((customer) => ({ value: customer.id, label: `${customer.name || 'Customer'}${customer.email ? ` · ${customer.email}` : ''}${customer.uid ? ` · ${customer.uid}` : ''}` }))]} onChange={setReportCustomer} /><select value={serviceCategory} onChange={(event) => setServiceCategory(event.target.value)}><option value="">All services</option>{reportCategories.map((category) => <option value={category} key={category}>{category}</option>)}</select><button className="button button-soft" onClick={clearReportFilters} disabled={!reportSalon && !reportCustomer && !serviceCategory}>Clear filters</button><button className="button button-soft" onClick={downloadReport}>↓ Export CSV</button></div>
             <ReportCards report={report} />
             <div className="panel-box report-breakdown"><h3>Service performance</h3>{report?.services?.length ? reportServiceList.visibleItems.map((service) => <div className="report-row" key={service.category}><span>{service.category}<small>{service.orders} services booked</small></span><strong>{money(service.revenue)}</strong></div>) : <p className="muted">No paid bookings in this period yet.</p>}<LoadMoreButton shown={reportServiceList.visibleItems.length} total={(report?.services || []).length} onClick={reportServiceList.loadMore} label="service categories" /></div>
             <div className="panel-box approvals"><div className="panel-title-row"><h3>Salon applications</h3><span className="result-count">{pendingSalons.length} pending</span></div>{!pendingSalons.length && <p className="muted">All caught up.</p>}{pendingSalonList.visibleItems.map((salon) => <div className="owner-salon-row" key={salon.id}><div><strong>{salon.name}</strong><small>{salon.address}, {salon.city} · {salon.ownerId?.name || 'Owner'}{salon.ownerId?.uid ? ` · UID: ${salon.ownerId.uid}` : ''}</small></div><div className="approval-actions"><button className="button button-primary button-small" onClick={() => setSalonApproval(salon.id, true)}>Approve</button><button className="button button-soft button-small" onClick={() => setSalonApproval(salon.id, false)}>Keep pending</button></div></div>)}<LoadMoreButton shown={pendingSalonList.visibleItems.length} total={pendingSalons.length} onClick={pendingSalonList.loadMore} label="salon applications" /></div>
@@ -2862,6 +3193,7 @@ function App() {
       </footer>
       {toast && <div className="toast" role="status">{toast}</div>}
       <ConfirmationDialog confirmation={confirmation} onResolve={resolveConfirmation} />
+      {salonQr && <SalonQrDialog salon={salonQr} onClose={() => setSalonQr(null)} />}
       {nonRefundableNoticeOpen && <div className="dialog-backdrop booking-payment-notice-backdrop" role="presentation" onMouseDown={(event) => {
         if (event.target === event.currentTarget) setNonRefundableNoticeOpen(false);
       }}>
