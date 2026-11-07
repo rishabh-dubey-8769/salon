@@ -505,7 +505,221 @@ async function resizeSalonImage(file) {
   }
 }
 
-function ProfilePage({ user, bookings, onUserUpdated, onBack, onSignOut, onCancelBooking, onOpenUpiPayment }) {
+const toLocalDateTimeInput = (date) => {
+  const localDate = new Date(date.getTime() - date.getTimezoneOffset() * 60_000);
+  return localDate.toISOString().slice(0, 16);
+};
+const announcementDurations = {
+  '5m': 5 * 60_000,
+  '10m': 10 * 60_000,
+  '30m': 30 * 60_000,
+  '1h': 60 * 60_000,
+  '6h': 6 * 60 * 60_000,
+  '1d': 24 * 60 * 60_000,
+  '1w': 7 * 24 * 60 * 60_000,
+};
+
+function AnnouncementManager({ onChanged }) {
+  const [announcements, setAnnouncements] = useState([]);
+  const [formOpen, setFormOpen] = useState(false);
+  const [audience, setAudience] = useState('both');
+  const [message, setMessage] = useState('');
+  const [duration, setDuration] = useState('10m');
+  const [startsAt, setStartsAt] = useState(() => toLocalDateTimeInput(new Date()));
+  const [expiresAt, setExpiresAt] = useState(() => toLocalDateTimeInput(new Date(Date.now() + announcementDurations['10m'])));
+  const [editingId, setEditingId] = useState('');
+  const [deletingId, setDeletingId] = useState('');
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+  const [notice, setNotice] = useState('');
+
+  const loadAnnouncements = async () => {
+    setError('');
+    try {
+      const result = await api('/api/admin/announcements');
+      if (!Array.isArray(result.announcements)) throw new Error('The server returned an invalid announcement list.');
+      setAnnouncements(result.announcements);
+    } catch (requestError) {
+      setError(requestError.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    loadAnnouncements();
+    const timer = window.setInterval(loadAnnouncements, 15_000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  const resetForm = () => {
+    const now = new Date();
+    setEditingId('');
+    setAudience('both');
+    setMessage('');
+    setDuration('10m');
+    setStartsAt(toLocalDateTimeInput(now));
+    setExpiresAt(toLocalDateTimeInput(new Date(now.getTime() + announcementDurations['10m'])));
+    setFormOpen(false);
+  };
+
+  const changeDuration = (nextDuration) => {
+    setDuration(nextDuration);
+    if (nextDuration !== 'custom') {
+      const start = new Date();
+      setStartsAt(toLocalDateTimeInput(start));
+      setExpiresAt(toLocalDateTimeInput(new Date(start.getTime() + announcementDurations[nextDuration])));
+    }
+  };
+
+  const editAnnouncement = (announcement) => {
+    setFormOpen(true);
+    setEditingId(announcement.id);
+    setAudience(announcement.audience);
+    setMessage(announcement.message);
+    setDuration('custom');
+    setStartsAt(toLocalDateTimeInput(new Date(announcement.startsAt)));
+    setExpiresAt(toLocalDateTimeInput(new Date(announcement.expiresAt)));
+    setError('');
+    setNotice('');
+    window.requestAnimationFrame(() => document.getElementById('admin-announcement-form')?.scrollIntoView({ behavior: 'smooth', block: 'center' }));
+  };
+
+  const saveAnnouncement = async (event) => {
+    event.preventDefault();
+    setError('');
+    setNotice('');
+    const start = duration === 'custom' ? new Date(startsAt) : new Date();
+    const end = duration === 'custom'
+      ? new Date(expiresAt)
+      : new Date(start.getTime() + announcementDurations[duration]);
+    if (!Number.isFinite(start.getTime()) || !Number.isFinite(end.getTime())) {
+      setError('Choose valid announcement start and end times.');
+      return;
+    }
+    if (end <= start) {
+      setError('The end time must be after the start time.');
+      return;
+    }
+    if (end <= new Date()) {
+      setError('The end time must be in the future.');
+      return;
+    }
+    setSaving(true);
+    try {
+      const result = await api(editingId ? `/api/admin/announcements/${editingId}` : '/api/admin/announcements', {
+        method: editingId ? 'PATCH' : 'POST',
+        body: JSON.stringify({ audience, message, startsAt: start.toISOString(), expiresAt: end.toISOString() }),
+      });
+      setNotice(result.message || (editingId ? 'Announcement updated.' : 'Announcement published.'));
+      resetForm();
+      await Promise.all([loadAnnouncements(), onChanged()]);
+    } catch (requestError) {
+      setError(requestError.message);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const deleteAnnouncement = async (announcementId) => {
+    setError('');
+    try {
+      const result = await api(`/api/admin/announcements/${announcementId}`, { method: 'DELETE' });
+      setNotice(result.message);
+      setDeletingId('');
+      if (editingId === announcementId) resetForm();
+      await Promise.all([loadAnnouncements(), onChanged()]);
+    } catch (requestError) {
+      setError(requestError.message);
+      setDeletingId('');
+    }
+  };
+
+  return (
+    <section className="admin-announcement-manager panel-box">
+      {!formOpen && <button className="button button-primary admin-announcement-open-form" type="button" onClick={() => {
+        resetForm();
+        setFormOpen(true);
+      }}>＋ Publish a general message</button>}
+      {formOpen && <form className="admin-announcement-form" id="admin-announcement-form" onSubmit={saveAnnouncement}>
+        <label>Show to
+          <select value={audience} onChange={(event) => setAudience(event.target.value)}>
+            <option value="customers">Customers</option>
+            <option value="salon_owners">Salon owners</option>
+            <option value="both">Both</option>
+          </select>
+        </label>
+        <label>Message
+          <textarea value={message} onChange={(event) => setMessage(event.target.value)} maxLength={2000} rows={4} required placeholder="Write the general message…" />
+        </label>
+        <label>Show duration
+          <select value={duration} onChange={(event) => changeDuration(event.target.value)}>
+            <option value="5m">5 minutes</option>
+            <option value="10m">10 minutes</option>
+            <option value="30m">30 minutes</option>
+            <option value="1h">1 hour</option>
+            <option value="6h">6 hours</option>
+            <option value="1d">1 day</option>
+            <option value="1w">1 week</option>
+            <option value="custom">Choose start and end time</option>
+          </select>
+        </label>
+        {duration === 'custom' ? (
+          <div className="admin-announcement-datetime">
+            <label>Starts at<input type="datetime-local" value={startsAt} onChange={(event) => setStartsAt(event.target.value)} required /></label>
+            <label>Ends at<input type="datetime-local" value={expiresAt} onChange={(event) => setExpiresAt(event.target.value)} required /></label>
+          </div>
+        ) : (
+          <p className="fine-print admin-announcement-expiry">Starts immediately · Ends {new Date(expiresAt).toLocaleString()}</p>
+        )}
+        {error && <p className="form-error" role="alert">{error}</p>}
+        {notice && <p className="profile-success" role="status">{notice}</p>}
+        <div className="admin-announcement-form-actions">
+          <button className="button button-primary" type="submit" disabled={saving || !message.trim()}>{saving ? 'Saving…' : editingId ? 'Save changes' : 'Publish message'}</button>
+          {editingId && <button className="button button-soft" type="button" onClick={resetForm} disabled={saving}>Cancel edit</button>}
+          {!editingId && <button className="button button-soft" type="button" onClick={resetForm} disabled={saving}>Cancel</button>}
+        </div>
+      </form>}
+
+      <div className="admin-announcement-list">
+        <h3>Scheduled and published messages</h3>
+        {loading && <p className="muted">Loading messages…</p>}
+        {!loading && !announcements.length && <p className="muted">No scheduled or active messages.</p>}
+        {announcements.map((announcement) => {
+          const isLive = new Date(announcement.startsAt) <= new Date();
+          return (
+            <article className="admin-announcement-card" key={announcement.id}>
+              <div className="admin-announcement-card-copy">
+                <div className="admin-announcement-card-meta">
+                  <span className={`status-pill ${isLive ? 'status-completed' : 'status-waiting'}`}>{isLive ? 'Published' : 'Scheduled'}</span>
+                  <span>{announcement.audience === 'both' ? 'Customers & salon owners' : announcement.audience === 'customers' ? 'Customers' : 'Salon owners'}</span>
+                </div>
+                <p>{announcement.message}</p>
+                <small>{new Date(announcement.startsAt).toLocaleString()} – {new Date(announcement.expiresAt).toLocaleString()}</small>
+              </div>
+              <div className="admin-announcement-card-actions">
+                {deletingId === announcement.id ? (
+                  <>
+                    <button className="button button-confirm-danger button-small" type="button" onClick={() => deleteAnnouncement(announcement.id)}>Confirm delete</button>
+                    <button className="button button-soft button-small" type="button" onClick={() => setDeletingId('')}>Cancel</button>
+                  </>
+                ) : (
+                  <>
+                    <button className="button button-soft button-small" type="button" onClick={() => editAnnouncement(announcement)}>Edit</button>
+                    <button className="text-button danger-text" type="button" onClick={() => setDeletingId(announcement.id)}>Delete</button>
+                  </>
+                )}
+              </div>
+            </article>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
+function ProfilePage({ user, bookings, onUserUpdated, onBack, onSignOut, onCancelBooking, onOpenUpiPayment, onAnnouncementChanged }) {
   const [name, setName] = useState(user.name || '');
   const [gender, setGender] = useState(user.gender || '');
   const [dateOfBirth, setDateOfBirth] = useState(user.dateOfBirth ? user.dateOfBirth.slice(0, 10) : '');
@@ -629,6 +843,8 @@ function ProfilePage({ user, bookings, onUserUpdated, onBack, onSignOut, onCance
         </div>
         <button className="button button-soft profile-signout" onClick={onSignOut}>Sign out</button>
       </div>
+
+      {user.role === 'admin' && <AnnouncementManager onChanged={onAnnouncementChanged} />}
 
       <form className="profile-details panel-box" onSubmit={saveProfile}>
         <div className="profile-photo-row">
@@ -2286,6 +2502,8 @@ function App() {
   const [authOpen, setAuthOpen] = useState(false);
   const [authReturnPage, setAuthReturnPage] = useState('profile');
   const [contactAdminOpen, setContactAdminOpen] = useState(false);
+  const [announcementInfo, setAnnouncementInfo] = useState({ hasActiveAnnouncement: false, announcement: null });
+  const [announcementLoadError, setAnnouncementLoadError] = useState('');
   const [toast, setToast] = useState('');
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
@@ -2379,6 +2597,20 @@ function App() {
     setToast(message);
     window.clearTimeout(toastTimerRef.current);
     toastTimerRef.current = window.setTimeout(() => setToast(''), 3500);
+  }, []);
+
+  const refreshAnnouncement = useCallback(async () => {
+    try {
+      const result = await api('/api/announcements/active');
+      if (typeof result?.hasActiveAnnouncement !== 'boolean') {
+        throw new Error('The server returned an invalid announcement response.');
+      }
+      setAnnouncementInfo(result);
+      setAnnouncementLoadError('');
+    } catch (requestError) {
+      setAnnouncementInfo({ hasActiveAnnouncement: false, announcement: null });
+      setAnnouncementLoadError(requestError.message);
+    }
   }, []);
 
   const openAdminContact = () => {
@@ -2583,6 +2815,24 @@ function App() {
       .catch(() => {})
       .finally(() => setSessionReady(true));
   }, []);
+
+  useEffect(() => {
+    if (!sessionReady) return undefined;
+    refreshAnnouncement();
+    const timer = window.setInterval(refreshAnnouncement, 15_000);
+    return () => window.clearInterval(timer);
+  }, [sessionReady, user?.id, user?.role, refreshAnnouncement]);
+
+  useEffect(() => {
+    if (!announcementInfo.announcement) return undefined;
+    const expiryDelay = new Date(announcementInfo.announcement.expiresAt).getTime() - Date.now();
+    if (expiryDelay <= 0) {
+      refreshAnnouncement();
+      return undefined;
+    }
+    const timer = window.setTimeout(refreshAnnouncement, expiryDelay + 25);
+    return () => window.clearTimeout(timer);
+  }, [announcementInfo, refreshAnnouncement]);
 
   useEffect(() => {
     const expectedHash = PAGE_HASHES[page];
@@ -3034,6 +3284,19 @@ function App() {
           </button>
         </nav>
       </header>
+      {announcementLoadError && sessionReady && <div className="announcement-load-error" role="alert">Could not load the admin announcement. {announcementLoadError}</div>}
+      {announcementInfo.announcement && sessionReady && <aside className="admin-announcement-banner" aria-live="polite">
+        <span className="announcement-alert-symbol" aria-hidden="true">⚠</span>
+        <div><strong>Important message from admin</strong><p>{announcementInfo.announcement.message}</p></div>
+      </aside>}
+      {!user && announcementInfo.hasActiveAnnouncement && sessionReady && <button className="admin-announcement-teaser" type="button" onClick={() => {
+        setAuthReturnPage(page);
+        setAuthOpen(true);
+      }}>
+        <span className="announcement-alert-symbol" aria-hidden="true">⚠</span>
+        <span><strong>Important message from admin</strong><small>Sign in or create an account to view it.</small></span>
+        <span className="announcement-teaser-arrow" aria-hidden="true">→</span>
+      </button>}
 
       <main id="home">
         {page === 'orders' && user ? (
@@ -3059,6 +3322,7 @@ function App() {
               onSignOut={signOut}
               onCancelBooking={cancelBooking}
               onOpenUpiPayment={openUpiPayment}
+              onAnnouncementChanged={refreshAnnouncement}
             />
           )
         ) : (
