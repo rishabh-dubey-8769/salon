@@ -303,13 +303,9 @@ async function createSalonVisitingCard(salon) {
   context.fillStyle = cardGradient;
   context.fillRect(0, 0, width, height);
 
-  const borderGradient = context.createLinearGradient(0, 0, width, height);
-  borderGradient.addColorStop(0, '#df5d8a');
-  borderGradient.addColorStop(0.5, '#a35ac1');
-  borderGradient.addColorStop(1, '#6478d4');
-  context.strokeStyle = borderGradient;
-  context.lineWidth = 8;
-  roundCanvasRect(context, 4, 4, width - 8, height - 8, 38);
+  context.strokeStyle = '#b86b91';
+  context.lineWidth = 3;
+  roundCanvasRect(context, 8, 8, width - 16, height - 16, 34);
   context.stroke();
 
   context.fillStyle = '#b44476';
@@ -374,6 +370,14 @@ async function createSalonVisitingCard(salon) {
     context.fillStyle = '#514857';
     context.font = '600 25px Arial, sans-serif';
     context.fillText(String(salon.pinCode), textX, 477);
+  }
+  if (salon.phone) {
+    context.fillStyle = '#a34577';
+    context.font = '700 22px Arial, sans-serif';
+    context.fillText('CALL', textX, 535);
+    context.fillStyle = '#514857';
+    context.font = '600 25px Arial, sans-serif';
+    context.fillText(String(salon.phone), textX, 572, textWidth);
   }
 
   const qrDataUrl = await QRCode.toDataURL(getSalonProfileUrl(salon.id), {
@@ -725,7 +729,7 @@ function UpiPaymentDialog({ booking, payment, onClose, onSubmitReference }) {
         <p className="muted">The advance payment is non-refundable. Pay the service amount directly to the salon after your visit.</p>
         <p className="upi-payee"><strong>Pay to:</strong> {payment.payeeName}<br /><strong>Reference:</strong> {payment.reference}</p>
         <a className="button button-primary full-width upi-open-button" href={payment.upiUrl}>Open a UPI app and pay {money(payment.amount)}</a>
-        <div className="upi-qr-panel"><span className="fine-print">Or scan this QR code from your UPI app</span>{qrCode ? <img src={qrCode} alt="UPI payment QR code" /> : <span className="muted">Preparing QR code…</span>}</div>
+        <div className="upi-qr-panel"><span className="fine-print">Or scan this QR code from your UPI app</span>{qrCode ? <img src={qrCode} alt="UPI payment QR code" /> : <span className="qr-preparing" role="status"><span className="payment-loader-spinner" aria-hidden="true" />Preparing QR code…</span>}</div>
         {submittedReference ? (
           <div className="alert" role="status">Reference {submittedReference} submitted. Your booking stays pending until an administrator verifies the credit in the bank account. Do not assume the payment is confirmed yet.</div>
         ) : (
@@ -2054,25 +2058,26 @@ export function RejectionFeedbackPage() {
 }
 
 function SalonQrDialog({ salon, onClose }) {
-  const [qrCode, setQrCode] = useState('');
+  const [cardUrl, setCardUrl] = useState('');
+  const [cardBlob, setCardBlob] = useState(null);
   const [error, setError] = useState('');
-  const salonUrl = useMemo(() => getSalonProfileUrl(salon.id), [salon.id]);
 
   useEffect(() => {
     let active = true;
-    setQrCode('');
+    let cardObjectUrl = '';
+    setCardUrl('');
+    setCardBlob(null);
     setError('');
-    QRCode.toDataURL(salonUrl, {
-      width: 320,
-      margin: 4,
-      errorCorrectionLevel: 'H',
-      color: { dark: '#63234f', light: '#fff7ed' },
-    })
-      .then((dataUrl) => {
-        if (active) setQrCode(dataUrl);
+    createSalonVisitingCard(salon)
+      .then((blob) => {
+        if (active) {
+          cardObjectUrl = URL.createObjectURL(blob);
+          setCardBlob(blob);
+          setCardUrl(cardObjectUrl);
+        }
       })
-      .catch((qrError) => {
-        if (active) setError(`Could not create this salon QR code: ${qrError.message}`);
+      .catch((cardError) => {
+        if (active) setError(`Could not create this salon visiting card: ${cardError.message}`);
       });
     const previousOverflow = document.body.style.overflow;
     document.body.style.overflow = 'hidden';
@@ -2082,12 +2087,13 @@ function SalonQrDialog({ salon, onClose }) {
     window.addEventListener('keydown', onKeyDown);
     return () => {
       active = false;
+      if (cardObjectUrl) URL.revokeObjectURL(cardObjectUrl);
       document.body.style.overflow = previousOverflow;
       window.removeEventListener('keydown', onKeyDown);
     };
-  }, [onClose, salonUrl]);
+  }, [onClose, salon]);
 
-  const downloadName = `${salon.name.toLowerCase().replace(/[^a-z0-9]+/g, '-')}-salon-qr.png`;
+  const downloadName = `${salon.name.toLowerCase().replace(/[^a-z0-9]+/g, '-')}-visiting-card.png`;
   const salonLocation = [salon.address, salon.city, salon.pinCode && `PIN ${salon.pinCode}`].filter(Boolean).join(' · ');
 
   return (
@@ -2100,14 +2106,14 @@ function SalonQrDialog({ salon, onClose }) {
         <h2 id="salon-qr-title">{salon.name}</h2>
         <p className="salon-qr-location">{salonLocation}</p>
         <div className="salon-qr-image-frame">
-          {qrCode ? <img src={qrCode} alt={`QR code to open ${salon.name} on SalonFlow`} /> : error ? <p className="form-error" role="alert">{error}</p> : <p className="muted" role="status">Creating your salon QR code…</p>}
+          {cardUrl ? <img className="salon-qr-visiting-card" src={cardUrl} alt={`${salon.name} visiting card with salon profile QR code`} /> : error ? <p className="form-error" role="alert">{error}</p> : <p className="muted" role="status">Creating your visiting card and QR code…</p>}
         </div>
-        <p className="fine-print">Scan with a phone camera to open this salon’s profile on SalonFlow.</p>
+        <p className="fine-print">Scan the QR code on the card to open this salon’s profile on SalonFlow.</p>
         <div className="salon-qr-actions">
           <button className="button button-soft" type="button" onClick={onClose}>Close</button>
-          <a className={`button button-primary ${qrCode ? '' : 'is-disabled'}`} href={qrCode || undefined} download={downloadName} aria-disabled={!qrCode} onClick={(event) => {
-            if (!qrCode) event.preventDefault();
-          }}>↓ Download QR code</a>
+          <a className={`button button-primary ${cardBlob ? '' : 'is-disabled'}`} href={cardUrl || undefined} download={downloadName} aria-disabled={!cardBlob} onClick={(event) => {
+            if (!cardBlob) event.preventDefault();
+          }}>↓ Download visiting card</a>
         </div>
       </section>
     </div>
@@ -3194,6 +3200,13 @@ function App() {
       {toast && <div className="toast" role="status">{toast}</div>}
       <ConfirmationDialog confirmation={confirmation} onResolve={resolveConfirmation} />
       {salonQr && <SalonQrDialog salon={salonQr} onClose={() => setSalonQr(null)} />}
+      {busy && !upiPayment && <div className="payment-preparing-backdrop" role="status" aria-live="polite">
+        <div className="payment-preparing-card">
+          <span className="payment-loader-spinner" aria-hidden="true" />
+          <strong>Preparing your payment</strong>
+          <span>Creating your UPI payment QR code…</span>
+        </div>
+      </div>}
       {nonRefundableNoticeOpen && <div className="dialog-backdrop booking-payment-notice-backdrop" role="presentation" onMouseDown={(event) => {
         if (event.target === event.currentTarget) setNonRefundableNoticeOpen(false);
       }}>
