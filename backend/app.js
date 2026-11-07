@@ -12,11 +12,11 @@ const adminRoutes = require('./routes/adminRoutes');
 const contactRoutes = require('./routes/contactRoutes');
 const announcementRoutes = require('./routes/announcementRoutes');
 const { errorHandler, notFound } = require('./middleware/errorHandler');
+const { getTrustProxySetting } = require('./utils/trustProxy');
 
 const app = express();
-if (process.env.TRUST_PROXY) {
-  app.set('trust proxy', Number(process.env.TRUST_PROXY) || process.env.TRUST_PROXY);
-}
+const trustProxySetting = getTrustProxySetting();
+if (trustProxySetting !== false) app.set('trust proxy', trustProxySetting);
 const allowedOrigins = (process.env.FRONTEND_URL || 'http://localhost:5173')
   .split(',')
   .map((origin) => origin.trim());
