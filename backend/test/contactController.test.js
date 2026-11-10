@@ -1,6 +1,5 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const nodemailer = require('nodemailer');
 const { sendAdminContactMessage } = require('../controllers/contactController');
 
 const invoke = async (request) => {
@@ -22,17 +21,20 @@ const invoke = async (request) => {
 };
 
 test('contact controller sends role-specific issue mail and an optional image attachment', async () => {
-  const originalCreateTransport = nodemailer.createTransport;
+  const originalFetch = global.fetch;
   const originalEnv = {
     ADMIN_EMAIL: process.env.ADMIN_EMAIL,
-    GMAIL_USER: process.env.GMAIL_USER,
-    GMAIL_APP_PASSWORD: process.env.GMAIL_APP_PASSWORD,
+    BREVO_API_KEY: process.env.BREVO_API_KEY,
+    EMAIL_FROM: process.env.EMAIL_FROM,
   };
   const sentEmails = [];
   process.env.ADMIN_EMAIL = 'admin@example.com';
-  process.env.GMAIL_USER = 'sender@example.com';
-  process.env.GMAIL_APP_PASSWORD = 'test-password';
-  nodemailer.createTransport = () => ({ sendMail: async (email) => sentEmails.push(email) });
+  process.env.BREVO_API_KEY = 'test-brevo-key';
+  process.env.EMAIL_FROM = 'verified@example.com';
+  global.fetch = async (url, options) => {
+    sentEmails.push(JSON.parse(options.body));
+    return { ok: true, status: 201 };
+  };
 
   try {
     const { response, forwardedError } = await invoke({
@@ -46,14 +48,17 @@ test('contact controller sends role-specific issue mail and an optional image at
     assert.equal(forwardedError, undefined);
     assert.equal(response.statusCode, 200);
     assert.equal(response.body.success, true);
-    assert.equal(sentEmails[0].to, 'admin@example.com');
+    assert.deepEqual(sentEmails[0].to, [{ email: 'admin@example.com' }]);
     assert.equal(sentEmails[0].subject, 'SalonFlow | Salon Owner Issue');
-    assert.equal(sentEmails[0].replyTo, 'owner@example.com');
-    assert.match(sentEmails[0].text, /UID: uid-123/);
-    assert.ok(sentEmails[0].attachments[0].content.subarray(0, 8).equals(Buffer.from('89504e470d0a1a0a', 'hex')));
-    assert.equal(sentEmails[0].attachments[0].contentType, 'image/png');
+    assert.deepEqual(sentEmails[0].replyTo, { email: 'owner@example.com' });
+    assert.match(sentEmails[0].textContent, /UID: uid-123/);
+    assert.equal(
+      Buffer.from(sentEmails[0].attachment[0].content, 'base64').subarray(0, 8).toString('hex'),
+      '89504e470d0a1a0a'
+    );
+    assert.equal(sentEmails[0].attachment[0].name, 'salonflow-issue.png');
   } finally {
-    nodemailer.createTransport = originalCreateTransport;
+    global.fetch = originalFetch;
     Object.entries(originalEnv).forEach(([key, value]) => {
       if (value === undefined) delete process.env[key];
       else process.env[key] = value;
