@@ -1,4 +1,4 @@
-const nodemailer = require('nodemailer');
+const sendBrevoEmail = require('../utils/sendBrevoEmail');
 
 const MAX_ATTACHMENT_BYTES = 900_000;
 const IMAGE_DATA_URL_PATTERN = /^data:(image\/(?:jpeg|png|webp));base64,([A-Za-z0-9+/]+={0,2})$/;
@@ -40,8 +40,8 @@ const sendAdminContactMessage = async (req, res, next) => {
       };
     }
 
-    const { ADMIN_EMAIL, GMAIL_USER, GMAIL_APP_PASSWORD, EMAIL_FROM } = process.env;
-    if (!ADMIN_EMAIL || !GMAIL_USER || !GMAIL_APP_PASSWORD) {
+    const { ADMIN_EMAIL, BREVO_API_KEY, EMAIL_FROM } = process.env;
+    if (!ADMIN_EMAIL || !BREVO_API_KEY || !EMAIL_FROM) {
       return res.status(503).json({ success: false, message: 'Admin email delivery is not configured. Please try again later.' });
     }
 
@@ -57,12 +57,7 @@ const sendAdminContactMessage = async (req, res, next) => {
       'Issue / feedback:',
       message,
     ].join('\n');
-    const transporter = nodemailer.createTransport({
-      service: 'gmail',
-      auth: { user: GMAIL_USER, pass: GMAIL_APP_PASSWORD },
-    });
-    await transporter.sendMail({
-      from: { name: 'SalonFlow', address: EMAIL_FROM || GMAIL_USER },
+    await sendBrevoEmail({
       to: ADMIN_EMAIL,
       ...(req.user.email ? { replyTo: req.user.email } : {}),
       subject: `SalonFlow | ${roleLabel}`,
