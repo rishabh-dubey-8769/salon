@@ -589,7 +589,6 @@ const confirmManagedBookingPayment = async (req, res, next) => {
         paymentMethod: 'upi_manual',
         paymentStatus: 'pending',
         status: 'pending_payment',
-        upiReference: { $exists: true },
       },
       {
         $set: {
@@ -605,7 +604,7 @@ const confirmManagedBookingPayment = async (req, res, next) => {
     if (!booking) {
       return res.status(409).json({
         success: false,
-        message: 'This booking has no submitted UPI reference or is no longer awaiting payment verification.',
+        message: 'This booking is not awaiting UPI payment confirmation.',
       });
     }
     await refreshWaitEstimates(booking.salonId);
