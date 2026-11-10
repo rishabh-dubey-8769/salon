@@ -17,12 +17,38 @@ const bookingStatusLabel = (status) => {
 };
 const paymentStatusLabel = (status, bookingStatus) =>
   `Payment: ${bookingStatus === 'cancelled' ? 'cancelled' : String(status || 'pending').replaceAll('_', ' ')}`;
+const canCustomerCancelBooking = (booking) =>
+  ['pending_payment', 'waiting'].includes(booking.status) &&
+  !booking.startedAt &&
+  !booking.completedAt &&
+  !(booking.paymentMethod === 'upi_manual' && booking.upiReference && booking.paymentStatus === 'pending') &&
+  !(booking.status === 'waiting' && booking.paymentStatus === 'paid' && booking.paymentMode === 'full');
 const formatWaitDuration = (minutes) => {
   const totalMinutes = Math.max(0, Math.floor(Number(minutes) || 0));
   if (totalMinutes <= 60) return `${totalMinutes} ${totalMinutes === 1 ? 'minute' : 'minutes'}`;
   const hours = Math.floor(totalMinutes / 60);
   const remainingMinutes = totalMinutes % 60;
   return `${hours} ${hours === 1 ? 'hour' : 'hours'}${remainingMinutes ? ` ${remainingMinutes} ${remainingMinutes === 1 ? 'minute' : 'minutes'}` : ''}`;
+};
+const formatClockDuration = (seconds) => {
+  const totalSeconds = Math.max(0, Math.floor(seconds));
+  const minutes = Math.floor(totalSeconds / 60);
+  const remainingSeconds = totalSeconds % 60;
+  return `${String(minutes).padStart(2, '0')}:${String(remainingSeconds).padStart(2, '0')}`;
+};
+const formatServiceTimestamp = (value) => {
+  if (!value) return '';
+  const date = new Date(value);
+  return Number.isNaN(date.getTime())
+    ? ''
+    : date.toLocaleString(undefined, {
+      day: '2-digit',
+      month: 'short',
+      year: 'numeric',
+      hour: 'numeric',
+      minute: '2-digit',
+      second: '2-digit',
+    });
 };
 const getLocalDateString = (date = new Date()) => {
   const year = date.getFullYear();
@@ -187,8 +213,33 @@ function ConfirmationDialog({ confirmation, onResolve }) {
   );
 }
 
+async function fetchApiResponse(url, options = {}) {
+  const isReadRequest = (options.method || 'GET').toUpperCase() === 'GET';
+  const retryableStatuses = [502, 503, 504];
+  const attempts = isReadRequest ? 2 : 1;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    let response;
+    try {
+      response = await fetch(url, options);
+    } catch (requestError) {
+      if (!isReadRequest || attempt === attempts - 1) {
+        throw new Error('Could not reach the server. Check your connection and try again.');
+      }
+      await new Promise((resolve) => window.setTimeout(resolve, 800));
+      continue;
+    }
+    if (isReadRequest && retryableStatuses.includes(response.status) && attempt < attempts - 1) {
+      await new Promise((resolve) => window.setTimeout(resolve, 800));
+      continue;
+    }
+    return response;
+  }
+  throw new Error('Could not reach the server. Check your connection and try again.');
+}
+
 async function api(path, options = {}) {
-  const response = await fetch(`${API_BASE}${path}`, {
+  const requestStartedAt = Date.now();
+  const response = await fetchApiResponse(`${API_BASE}${path}`, {
     credentials: 'include',
     ...options,
     headers: {
@@ -199,6 +250,11 @@ async function api(path, options = {}) {
   const contentType = response.headers.get('content-type') || '';
   const payload = contentType.includes('application/json') ? await response.json() : null;
   if (!response.ok) throw new Error(payload?.message || `Request failed (${response.status}).`);
+  const responseReceivedAt = Date.now();
+  const serverTime = Date.parse(payload?.serverTime);
+  if (Number.isFinite(serverTime)) {
+    payload.serverClockOffsetMs = serverTime - ((requestStartedAt + responseReceivedAt) / 2);
+  }
   return payload;
 }
 
@@ -719,7 +775,105 @@ function AnnouncementManager({ onChanged }) {
   );
 }
 
-function ProfilePage({ user, bookings, onUserUpdated, onBack, onSignOut, onCancelBooking, onOpenUpiPayment, onAnnouncementChanged }) {
+function ActiveBookingsPrompt({ count, cancelableCount, onDismiss, onViewBookings, onCancelAll }) {
+  const [cancelling, setCancelling] = useState(false);
+  const [cancelMessage, setCancelMessage] = useState('');
+  useEffect(() => {
+    const handleKeyDown = (event) => {
+      if (event.key === 'Escape') onDismiss();
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [onDismiss]);
+
+  const cancelBookings = async () => {
+    setCancelling(true);
+    setCancelMessage('');
+    try {
+      const message = await onCancelAll();
+      if (message) setCancelMessage(message);
+      else onDismiss();
+    } catch (requestError) {
+      setCancelMessage(requestError.message);
+    } finally {
+      setCancelling(false);
+    }
+  };
+
+  return (
+    <div className="dialog-backdrop active-bookings-prompt-backdrop" role="presentation" onMouseDown={(event) => {
+      if (event.target === event.currentTarget) onDismiss();
+    }}>
+      <section className="auth-dialog active-bookings-prompt" role="alertdialog" aria-modal="true" aria-labelledby="active-bookings-title" aria-describedby="active-bookings-message">
+        <span className="active-bookings-prompt-icon" aria-hidden="true">✦</span>
+        <h2 id="active-bookings-title">You have {count} active bookings</h2>
+        <p id="active-bookings-message">You may cancel bookings only before service starts. In-progress services cannot be cancelled; bookings awaiting payment review or refund support may also be unavailable.</p>
+        {cancelMessage && <p className="active-bookings-cancel-message" role="status">{cancelMessage}</p>}
+        <div className="active-bookings-prompt-actions">
+          <button className="button button-confirm-danger" type="button" disabled={!cancelableCount || cancelling} onClick={cancelBookings}>{cancelling ? 'Cancelling…' : `Cancel all bookings${cancelableCount ? ` (${cancelableCount})` : ''}`}</button>
+          <button className="button button-primary" type="button" onClick={onViewBookings}>View bookings</button>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function ServiceCountdown({ booking, serverClockOffsetMs = 0 }) {
+  const startedAt = new Date(booking.startedAt).getTime();
+  const estimatedDurationMs = (Array.isArray(booking.services) ? booking.services : []).reduce(
+    (total, service) => total + Math.max(0, Number(service.durationMinutes) || 0) * 60_000,
+    0
+  );
+  const [now, setNow] = useState(() => Date.now() + serverClockOffsetMs);
+
+  useEffect(() => {
+    let timer;
+    const tick = () => {
+      const serverNow = Date.now() + serverClockOffsetMs;
+      setNow(serverNow);
+      timer = window.setTimeout(tick, 1000 - (serverNow % 1000) + 2);
+    };
+    tick();
+    return () => window.clearTimeout(timer);
+  }, [serverClockOffsetMs]);
+
+  if (!Number.isFinite(startedAt) || estimatedDurationMs <= 0) {
+    return <span className="service-countdown-unavailable">Service timer unavailable</span>;
+  }
+
+  const elapsedMs = Math.max(0, now - startedAt);
+  const remainingSeconds = Math.ceil(Math.max(0, estimatedDurationMs - elapsedMs) / 1000);
+  const overtimeSeconds = Math.ceil(Math.max(0, elapsedMs - estimatedDurationMs) / 1000);
+  const progress = Math.min(100, (elapsedMs / estimatedDurationMs) * 100);
+  const isOvertime = remainingSeconds === 0;
+
+  return (
+    <div className={`service-countdown ${isOvertime ? 'is-overtime' : ''}`} role="timer" aria-label={isOvertime
+      ? `Estimated service duration exceeded by ${formatClockDuration(overtimeSeconds)}`
+      : `Estimated service time remaining ${formatClockDuration(remainingSeconds)}`}>
+      <div className="service-countdown-heading">
+        <span><i aria-hidden="true" />{isOvertime ? 'Estimated time exceeded' : 'Time remaining'}</span>
+        <strong>{formatClockDuration(isOvertime ? overtimeSeconds : remainingSeconds)}{isOvertime ? ' over' : ''}</strong>
+      </div>
+      <div className="service-countdown-track" aria-hidden="true">
+        <span style={{ width: `${progress}%` }} />
+      </div>
+    </div>
+  );
+}
+
+function ServiceTimeSummary({ booking }) {
+  const startedAt = formatServiceTimestamp(booking.startedAt);
+  const completedAt = formatServiceTimestamp(booking.completedAt);
+  return (
+    <div className="service-time-summary">
+      <span><strong>Started</strong> {startedAt || '—'}</span>
+      <span><strong>Ended</strong> {completedAt || (booking.status === 'in_service' ? 'In progress' : '—')}</span>
+    </div>
+  );
+}
+
+function ProfilePage({ user, bookings, serverClockOffsetMs, onClockSync, onUserUpdated, onBack, onSignOut, onCancelBooking, onOpenUpiPayment, onAnnouncementChanged }) {
   const [name, setName] = useState(user.name || '');
   const [gender, setGender] = useState(user.gender || '');
   const [dateOfBirth, setDateOfBirth] = useState(user.dateOfBirth ? user.dateOfBirth.slice(0, 10) : '');
@@ -746,6 +900,7 @@ function ProfilePage({ user, bookings, onUserUpdated, onBack, onSignOut, onCance
       .then((result) => {
         if (requestId !== historyRequestId.current) return;
         if (!Array.isArray(result.bookings)) throw new Error('The server returned an invalid booking history.');
+        if (Number.isFinite(result.serverClockOffsetMs)) onClockSync(result.serverClockOffsetMs);
         setHistoryBookings(result.bookings);
         setHistoryPage(1);
         setHistoryPages(result.pages || 1);
@@ -758,7 +913,7 @@ function ProfilePage({ user, bookings, onUserUpdated, onBack, onSignOut, onCance
         if (requestId === historyRequestId.current) setHistoryLoading(false);
       });
     return () => { historyRequestId.current += 1; };
-  }, [user.id]);
+  }, [user.id, onClockSync]);
 
   useEffect(() => {
     setHistoryBookings((current) => current.map((booking) =>
@@ -773,6 +928,7 @@ function ProfilePage({ user, bookings, onUserUpdated, onBack, onSignOut, onCance
     try {
       const result = await api(`/api/bookings/my-bookings?page=${nextPage}&limit=${LIST_PAGE_SIZE}`);
       if (!Array.isArray(result.bookings)) throw new Error('The server returned an invalid booking history.');
+      if (Number.isFinite(result.serverClockOffsetMs)) onClockSync(result.serverClockOffsetMs);
       setHistoryBookings((current) => [
         ...current,
         ...result.bookings.filter((booking) => !current.some((item) => item.id === booking.id)),
@@ -898,8 +1054,8 @@ function ProfilePage({ user, bookings, onUserUpdated, onBack, onSignOut, onCance
           {!historyLoading && !historyBookings.length && <div className="panel-box profile-empty"><h3>No bookings yet</h3><p className="muted">Your salon bookings and order history will appear here.</p><button className="button button-soft" onClick={onBack}>Explore salons</button></div>}
           {historyBookings.map((booking) => (
             <article className="history-card" key={booking.id}>
-              <div><span className={`status-pill status-${booking.status}`}>{bookingStatusLabel(booking.status)}</span><h3>{booking.salonId?.name || booking.salonSnapshot?.name || 'Salon visit'}</h3><p>{booking.services.map((service) => service.name).join(' · ')}</p>{booking.userUid && <p className="queue-position">Your UID: {booking.userUid}</p>}{booking.status === 'waiting' && booking.appointmentDate > getLocalDateString() && <p className="queue-position">Reserved for {formatAppointmentDate(booking.appointmentDate)}</p>}{booking.status === 'waiting' && (booking.appointmentDate || getLocalDateString()) <= getLocalDateString() && booking.queuePosition && <p className="queue-position">Queue #{booking.queuePosition} · about {formatWaitDuration(booking.estimatedWaitMinutes)}</p>}{booking.status === 'in_service' && <p className="queue-position">Your service is in progress</p>}{booking.status === 'rejected' && booking.rejectionReason && <p className="rejection-reason-display">Reason: {booking.rejectionReason}</p>}</div>
-              <div className="history-meta"><strong>{booking.status === 'cancelled' ? `${money(booking.paymentAmount)} advance payment cancelled` : booking.paymentStatus === 'paid' ? `${money(booking.paymentAmount)} advance payment paid` : `${money(booking.paymentAmount)} advance payment pending`}</strong>{booking.paymentMethod === 'upi_manual' && <small>Service charge to pay at salon: {money(booking.total)}</small>}{booking.paymentMethod === 'upi_manual' && booking.upiReference && booking.paymentStatus === 'pending' && <small>UPI reference submitted: {booking.upiReference} · Awaiting verification</small>}{booking.paymentMethod !== 'upi_manual' && booking.paymentMode === 'token' && <small>{money(Math.max(0, booking.total - booking.paymentAmount))} balance at salon</small>}{booking.appointmentDate && <small>Appointment: {formatAppointmentDate(booking.appointmentDate)}</small>}<small>Booked: {new Date(booking.createdAt).toLocaleString()}</small>{booking.status === 'pending_payment' && booking.paymentMethod === 'upi_manual' && !booking.upiReference && booking.upiPayment && <button className="button button-soft button-small" onClick={() => onOpenUpiPayment(booking, booking.upiPayment)}>Pay ₹{booking.paymentAmount} advance</button>}{['waiting', 'pending_payment'].includes(booking.status) && !(booking.paymentMethod === 'upi_manual' && booking.upiReference && booking.paymentStatus === 'pending') && <button className="text-button danger-text" onClick={() => onCancelBooking(booking.id)}>Cancel booking</button>}</div>
+              <div><span className={`status-pill status-${booking.status}`}>{bookingStatusLabel(booking.status)}</span><h3>{booking.salonId?.name || booking.salonSnapshot?.name || 'Salon visit'}</h3><p>{booking.services.map((service) => service.name).join(' · ')}</p><ServiceTimeSummary booking={booking} />{booking.userUid && <p className="queue-position">Your UID: {booking.userUid}</p>}{booking.status === 'waiting' && booking.appointmentDate > getLocalDateString() && <p className="queue-position">Reserved for {formatAppointmentDate(booking.appointmentDate)}</p>}{booking.status === 'waiting' && (booking.appointmentDate || getLocalDateString()) <= getLocalDateString() && booking.queuePosition && <p className="queue-position">Queue #{booking.queuePosition} · about {formatWaitDuration(booking.estimatedWaitMinutes)}</p>}{booking.status === 'in_service' && <ServiceCountdown booking={booking} serverClockOffsetMs={serverClockOffsetMs} />}{booking.status === 'rejected' && booking.rejectionReason && <p className="rejection-reason-display">Reason: {booking.rejectionReason}</p>}</div>
+              <div className="history-meta"><strong>{booking.status === 'cancelled' ? `${money(booking.paymentAmount)} advance payment cancelled` : booking.paymentStatus === 'paid' ? `${money(booking.paymentAmount)} advance payment paid` : `${money(booking.paymentAmount)} advance payment pending`}</strong>{booking.paymentMethod === 'upi_manual' && <small>Service charge to pay at salon: {money(booking.total)}</small>}{booking.paymentMethod === 'upi_manual' && booking.upiReference && booking.paymentStatus === 'pending' && <small>UPI reference submitted: {booking.upiReference} · Awaiting verification</small>}{booking.paymentMethod !== 'upi_manual' && booking.paymentMode === 'token' && <small>{money(Math.max(0, booking.total - booking.paymentAmount))} balance at salon</small>}{booking.appointmentDate && <small>Appointment: {formatAppointmentDate(booking.appointmentDate)}</small>}<small>Booked: {new Date(booking.createdAt).toLocaleString()}</small>{booking.status === 'pending_payment' && booking.paymentMethod === 'upi_manual' && !booking.upiReference && booking.upiPayment && <button className="button button-soft button-small" onClick={() => onOpenUpiPayment(booking, booking.upiPayment)}>Pay ₹{booking.paymentAmount} advance</button>}{['user', 'customer'].includes(user.role) && canCustomerCancelBooking(booking) && <button className="text-button danger-text" onClick={() => onCancelBooking(booking.id)}>Cancel booking</button>}</div>
             </article>
           ))}
           {historyLoading && <p className="muted">Loading booking history…</p>}
@@ -953,10 +1109,23 @@ function UpiPaymentDialog({ booking, payment, onClose, onSubmitReference }) {
         </div>
         <p className="muted">The advance payment is non-refundable. Pay the service amount directly to the salon after your visit.</p>
         <p className="upi-payee"><strong>Pay to:</strong> {payment.payeeName}<br /><strong>Reference:</strong> {payment.reference}</p>
-        <a className="button button-primary full-width upi-open-button" href={payment.upiUrl}>Open a UPI app and pay {money(payment.amount)}</a>
-        <div className="upi-qr-panel"><span className="fine-print">Or scan this QR code from your UPI app</span>{qrCode ? <img src={qrCode} alt="UPI payment QR code" /> : <span className="qr-preparing" role="status"><span className="payment-loader-spinner" aria-hidden="true" />Preparing QR code…</span>}</div>
+        <div className="upi-qr-panel">
+          <strong>Pay {money(payment.amount)} by scanning this UPI QR code</strong>
+          {qrCode ? (
+            <>
+              <img src={qrCode} alt="UPI payment QR code" />
+              <a className="button button-primary full-width" href={qrCode} download={`salonflow-upi-${booking.id}.png`}>Download payment QR</a>
+            </>
+          ) : (
+            <span className="qr-preparing" role="status"><span className="payment-loader-spinner" aria-hidden="true" />Preparing QR code…</span>
+          )}
+          <span className="fine-print">Scan it with another device, or save it and use your UPI app’s “scan from gallery” option if available.</span>
+        </div>
+        <p className="fine-print">If your UPI app shows a security warning or declines the payment, stop and do not retry through that prompt. Verify the payee name and exact amount in the app before approving any payment.</p>
         {submittedReference ? (
-          <div className="alert" role="status">Reference {submittedReference} submitted. Your booking stays pending until an administrator verifies the credit in the bank account. Do not assume the payment is confirmed yet.</div>
+          <div className="alert" role="status">{booking.paymentStatus === 'paid'
+            ? `Reference ${submittedReference} saved. The payment was already confirmed by an administrator.`
+            : `Reference ${submittedReference} submitted. Your booking stays pending until an administrator verifies the credit in the bank account. Do not assume the payment is confirmed yet.`}</div>
         ) : (
           <form className="upi-reference-form" onSubmit={submit}>
             <label>After paying, enter the 12-digit UPI reference number<input value={reference} onChange={(event) => setReference(event.target.value.replace(/\D/g, '').slice(0, 12))} inputMode="numeric" autoComplete="off" pattern="\d{12}" maxLength={12} placeholder="12-digit UPI reference" required /></label>
@@ -970,7 +1139,41 @@ function UpiPaymentDialog({ booking, payment, onClose, onSubmitReference }) {
   );
 }
 
-function OrdersHistoryPage({ user, onBack }) {
+function ConfirmedUpiReferenceForm({ booking, onSubmitted }) {
+  const [reference, setReference] = useState('');
+  const [error, setError] = useState('');
+  const [saving, setSaving] = useState(false);
+
+  const submit = async (event) => {
+    event.preventDefault();
+    setSaving(true);
+    setError('');
+    try {
+      const result = await api(`/api/bookings/${booking._id || booking.id}/upi-reference`, {
+        method: 'POST',
+        body: JSON.stringify({ upiReference: reference }),
+      });
+      onSubmitted(result.booking);
+    } catch (requestError) {
+      setError(requestError.message);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <form className="orders-history-reference-form" onSubmit={submit}>
+      <label>UPI reference not submitted
+        <input value={reference} onChange={(event) => setReference(event.target.value.replace(/\D/g, '').slice(0, 12))} inputMode="numeric" autoComplete="off" pattern="\d{12}" maxLength={12} placeholder="Enter 12-digit reference" required />
+      </label>
+      <p className="fine-print">Your payment and booking are already confirmed. Adding the reference only updates the booking record.</p>
+      {error && <p className="form-error" role="alert">{error}</p>}
+      <button className="button button-soft button-small" type="submit" disabled={saving || reference.length !== 12}>{saving ? 'Saving reference…' : 'Add reference'}</button>
+    </form>
+  );
+}
+
+function OrdersHistoryPage({ user, onBack, serverClockOffsetMs, onClockSync, onCancelBooking }) {
   const [bookings, setBookings] = useState([]);
   const [fromDate, setFromDate] = useState('');
   const [toDate, setToDate] = useState('');
@@ -982,6 +1185,8 @@ function OrdersHistoryPage({ user, onBack }) {
   const [pages, setPages] = useState(1);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [cancelActionError, setCancelActionError] = useState('');
+  const [cancellingBookingId, setCancellingBookingId] = useState('');
   const requestIdRef = useRef(0);
 
   useEffect(() => {
@@ -1007,6 +1212,7 @@ function OrdersHistoryPage({ user, onBack }) {
         const result = await api(`/api/bookings/history?${params.toString()}`);
         if (requestId !== requestIdRef.current) return;
         if (!Array.isArray(result.bookings)) throw new Error('The server returned an invalid booking history.');
+        if (Number.isFinite(result.serverClockOffsetMs)) onClockSync(result.serverClockOffsetMs);
         setBookings((current) => page === 1
           ? result.bookings
           : [...current, ...result.bookings.filter((booking) => !current.some((item) => (item._id || item.id) === (booking._id || booking.id)))]);
@@ -1024,7 +1230,7 @@ function OrdersHistoryPage({ user, onBack }) {
       window.clearTimeout(timer);
       requestIdRef.current += 1;
     };
-  }, [fromDate, toDate, fromTime, toTime, salon, status, page]);
+  }, [fromDate, toDate, fromTime, toTime, salon, status, page, onClockSync]);
 
   const clearFilters = () => {
     setFromDate('');
@@ -1038,6 +1244,31 @@ function OrdersHistoryPage({ user, onBack }) {
   const changeFilter = (setter) => (event) => {
     setter(event.target.value);
     setPage(1);
+  };
+  const updateBookingReference = (updatedBooking) => {
+    setBookings((current) => current.map((booking) =>
+      (booking._id || booking.id) === (updatedBooking._id || updatedBooking.id)
+        ? { ...booking, upiReference: updatedBooking.upiReference }
+        : booking
+    ));
+  };
+  const cancelHistoryBooking = async (booking) => {
+    const bookingId = booking._id || booking.id;
+    setCancellingBookingId(bookingId);
+    setCancelActionError('');
+    try {
+      if (await onCancelBooking(bookingId)) {
+        setBookings((current) => current.map((item) =>
+          (item._id || item.id) === bookingId ? { ...item, status: 'cancelled' } : item
+        ));
+      } else {
+        setCancelActionError('This booking could not be cancelled. Please try again or contact support.');
+      }
+    } catch (requestError) {
+      setCancelActionError(requestError.message);
+    } finally {
+      setCancellingBookingId('');
+    }
   };
 
   return (
@@ -1068,6 +1299,7 @@ function OrdersHistoryPage({ user, onBack }) {
       </div>
 
       {error && <div className="alert" role="alert">{error}</div>}
+      {cancelActionError && <div className="alert" role="alert">{cancelActionError}</div>}
       {loading && <p className="muted orders-history-message">Loading booking history…</p>}
       {!loading && !error && !bookings.length && <div className="panel-box profile-empty"><h3>No matching orders</h3><p className="muted">Try changing or clearing the filters.</p></div>}
       <div className="orders-history-list">
@@ -1094,6 +1326,8 @@ function OrdersHistoryPage({ user, onBack }) {
                 <div><span>Service total</span><strong>{money(booking.total)}</strong></div>
                 {booking.expressFee > 0 && <div><span>Express fee</span><strong>{money(booking.expressFee)}</strong></div>}
                 <div><span>Payment method</span><strong>{booking.paymentMethod === 'upi_manual' ? 'UPI' : booking.paymentMethod || 'Not recorded'}</strong></div>
+                <div><span>Service started</span><strong>{formatServiceTimestamp(booking.startedAt) || '—'}</strong></div>
+                <div><span>Service ended</span><strong>{formatServiceTimestamp(booking.completedAt) || (booking.status === 'in_service' ? 'In progress' : '—')}</strong></div>
                 {booking.estimatedWaitMinutes > 0 && <div><span>Estimated wait</span><strong>{formatWaitDuration(booking.estimatedWaitMinutes)}</strong></div>}
                 {booking.userUid && <div><span>Your UID</span><strong>{booking.userUid}</strong></div>}
                 {booking.ownerUid && <div><span>Your owner UID</span><strong>{booking.ownerUid}</strong></div>}
@@ -1103,6 +1337,14 @@ function OrdersHistoryPage({ user, onBack }) {
                 {booking.rejectionReason && <div><span>Rejection reason</span><strong>{booking.rejectionReason}</strong></div>}
                 {booking.rejectionFeedback && <div><span>Your feedback</span><strong>{booking.rejectionFeedback}</strong></div>}
               </div>
+              {booking.status === 'in_service' && <ServiceCountdown booking={booking} serverClockOffsetMs={serverClockOffsetMs} />}
+              {['user', 'customer'].includes(user.role) && canCustomerCancelBooking(booking) && <button className="text-button danger-text orders-history-cancel" type="button" disabled={Boolean(cancellingBookingId)} onClick={() => cancelHistoryBooking(booking)}>{cancellingBookingId === (booking._id || booking.id) ? 'Cancelling…' : 'Cancel booking'}</button>}
+              {['user', 'customer'].includes(user.role) &&
+                booking.paymentMethod === 'upi_manual' &&
+                booking.paymentStatus === 'paid' &&
+                !booking.upiReference &&
+                ['waiting', 'in_service', 'completed'].includes(booking.status) &&
+                <ConfirmedUpiReferenceForm booking={booking} onSubmitted={updateBookingReference} />}
             </article>
           );
         })}
@@ -1462,7 +1704,7 @@ function SearchableAdminSelect({ label, value, options, placeholder, onChange, s
 }
 
 function AdminManagement({ customers = [], salons = [], onChanged, onConfirm }) {
-  const [section, setSection] = useState('customers');
+  const [section, setSection] = useState('bookings');
   const [search, setSearch] = useState('');
   const [activeFilter, setActiveFilter] = useState('');
   const [bookingStatus, setBookingStatus] = useState('');
@@ -1519,7 +1761,10 @@ function AdminManagement({ customers = [], salons = [], onChanged, onConfirm }) 
       if (requestId !== requestIdRef.current) return;
       setRecords((current) => requestedPage === 1
         ? nextRecords
-        : [...current, ...nextRecords.filter((record) => !current.some((item) => (item.id || item._id) === (record.id || record._id)))]);
+        : [
+          ...current.map((record) => nextRecords.find((item) => (item.id || item._id) === (record.id || record._id)) || record),
+          ...nextRecords.filter((record) => !current.some((item) => (item.id || item._id) === (record.id || record._id))),
+        ]);
       if (requestedPage === 1) setPage(1);
       setPages(result.pages || 1);
     } catch (requestError) {
@@ -1536,6 +1781,12 @@ function AdminManagement({ customers = [], salons = [], onChanged, onConfirm }) 
     const timer = window.setTimeout(loadRecords, 250);
     return () => window.clearTimeout(timer);
   }, [loadRecords]);
+
+  useEffect(() => {
+    if (section !== 'bookings') return undefined;
+    const timer = window.setInterval(() => loadRecords(page), 30_000);
+    return () => window.clearInterval(timer);
+  }, [section, page, loadRecords]);
 
   const switchSection = (nextSection) => {
     requestIdRef.current += 1;
@@ -1757,15 +2008,20 @@ function AdminManagement({ customers = [], salons = [], onChanged, onConfirm }) 
       await loadRecords(1);
       onChanged();
     } catch (requestError) {
-      setError(requestError.message);
+      setError(/no submitted UPI reference/i.test(requestError.message)
+        ? `${requestError.message} The API is likely still running older code. Restart the local backend or deploy the updated backend, then retry.`
+        : requestError.message);
     }
   };
 
   const confirmUpiPayment = async (booking) => {
+    const referenceNote = booking.upiReference
+      ? `Submitted UPI reference: ${booking.upiReference}.`
+      : 'The customer has not submitted a UPI reference. Confirm only if the amount and transaction timing match the customer and booking in your bank account.';
     const confirmed = await onConfirm({
-      title: 'Confirm payment received?',
-      message: `Confirm that ₹${booking.paymentAmount} was actually credited to the platform account for UPI reference ${booking.upiReference}. Only confirm after checking the bank transaction.`,
-      confirmLabel: 'Confirm payment',
+      title: 'Confirm payment and booking slot?',
+      message: `${referenceNote} Confirm that ₹${booking.paymentAmount} was actually credited to the platform account and matches this booking. This marks payment as received and places the booking in the queue.`,
+      confirmLabel: 'Confirm payment & slot',
     });
     if (!confirmed) return;
     try {
@@ -1809,13 +2065,12 @@ function AdminManagement({ customers = [], salons = [], onChanged, onConfirm }) 
 
   return (
     <section className="admin-management">
-      <div className="admin-management-heading"><div><span className="eyebrow">Platform records</span><h2>Manage customers, salons &amp; bookings</h2><p className="muted">Search records, edit details, block access, or manage booking queues. Passwords are never exposed; verify UPI credits against the actual bank transaction before confirming.</p></div></div>
       <div className="segmented admin-management-tabs" role="tablist">
+        <button type="button" className={section === 'bookings' ? 'active' : ''} onClick={() => switchSection('bookings')}>Bookings</button>
         <button type="button" className={section === 'customers' ? 'active' : ''} onClick={() => switchSection('customers')}>Customers</button>
         <button type="button" className={section === 'salons' ? 'active' : ''} onClick={() => switchSection('salons')}>Salons &amp; services</button>
-        <button type="button" className={section === 'bookings' ? 'active' : ''} onClick={() => switchSection('bookings')}>Bookings</button>
       </div>
-      <div className="admin-management-filters">
+      <div className={`admin-management-filters ${section === 'bookings' ? 'admin-booking-filters' : ''}`}>
         <label className="admin-record-search">Search {section === 'customers' ? 'UID, name, email, phone, or location' : section === 'salons' ? 'salon, owner UID/name/email, city, address, or service' : 'customer or salon UID, name, or service'}<input value={search} onChange={(event) => { setSearch(event.target.value); setPage(1); }} placeholder="Type to search..." /></label>
         {section === 'customers' && <>
           <label>Access<select value={activeFilter} onChange={(event) => { setActiveFilter(event.target.value); setPage(1); }}><option value="">All</option><option value="true">Active</option><option value="false">Blocked</option></select></label>
@@ -1897,7 +2152,7 @@ function AdminManagement({ customers = [], salons = [], onChanged, onConfirm }) 
           const recordId = record.id || record._id;
           const isEditing = editingId === recordId;
           return (
-            <article className="panel-box admin-record-card" key={recordId}>
+            <article className={`panel-box admin-record-card ${section === 'bookings' ? 'admin-booking-record-card' : ''}`} key={recordId}>
               {section === 'customers' && <>
                 <div className="admin-record-summary"><div><strong>{record.name}</strong><span>UID: {record.uid || 'Pending assignment'}</span><span>{record.email || 'No email'}{record.phone ? ` · ${record.phone}` : ''}{record.contactPhone ? ` · Contact ${record.contactPhone}` : ''}</span><span>Account created: {record.createdAt ? new Date(record.createdAt).toLocaleString() : 'Unknown'}</span><span>Last updated: {record.updatedAt ? new Date(record.updatedAt).toLocaleString() : 'Unknown'}</span></div><div className="admin-record-badges"><span className="status-pill">Customer</span><span className={`status-pill ${record.isActive ? 'status-waiting' : 'status-cancelled'}`}>{record.isActive ? 'Active' : 'Blocked'}</span></div></div>
                 {isEditing ? (
@@ -1946,8 +2201,30 @@ function AdminManagement({ customers = [], salons = [], onChanged, onConfirm }) 
               </>}
 
               {section === 'bookings' && <>
-                <div className="admin-record-summary"><div><strong>{record.userId?.name || 'Customer'} · {record.salonId?.name || record.salonSnapshot?.name || 'Salon'}</strong><span>{record.userId?.email || 'No email'}{record.userId?.uid ? ` · Customer UID: ${record.userId.uid}` : ''}{record.salonId?.ownerId?.uid ? ` · Owner UID: ${record.salonId.ownerId.uid}` : ''} · {(Array.isArray(record.services) ? record.services : []).map((service) => service.name).join(', ')}</span>{record.appointmentDate && <span>Appointment: {formatAppointmentDate(record.appointmentDate)}</span>}{record.paymentMethod === 'upi_manual' && <span>UPI advance payment: {money(record.paymentAmount)} · platform payee {record.upiPayeeName || 'not recorded'} · Ref: {record.upiReference || 'not submitted'}</span>}<span>Services payable at salon: {money(record.total)} · Booked: {new Date(record.createdAt).toLocaleString()} · {record.priority}</span></div><div className="admin-record-badges"><span className={`status-pill status-${record.status || 'unknown'}`}>{bookingStatusLabel(record.status)}</span><span className="status-pill">{paymentStatusLabel(record.paymentStatus, record.status)}</span></div></div>
-                <div className="admin-record-actions"><span className="admin-booking-amount">{record.status === 'cancelled' ? `${money(record.paymentAmount)} advance payment cancelled · services ${money(record.total)}` : record.paymentStatus === 'paid' ? `${money(record.paymentAmount)} advance payment received · services ${money(record.total)}` : `${money(record.paymentAmount)} advance payment pending · services ${money(record.total)}`}</span>{record.paymentMethod === 'upi_manual' && record.status === 'pending_payment' && record.upiReference && <><button className="button button-primary button-small" onClick={() => confirmUpiPayment(record)}>Confirm bank credit</button><button className="button button-soft button-small" onClick={() => rejectUpiPayment(record)}>Reject reference</button></>}{record.status === 'waiting' && <button className="button button-primary button-small" onClick={() => updateBookingStatus(record, 'in_service')}>Start service</button>}{record.status === 'in_service' && <button className="button button-soft button-small" onClick={() => updateBookingStatus(record, 'completed')}>Complete service</button>}</div>
+                <div className="admin-record-summary">
+                  <div className="admin-booking-summary-main">
+                    <strong>{record.userId?.name || 'Customer'} · {record.salonId?.name || record.salonSnapshot?.name || 'Salon'}</strong>
+                    <dl className="admin-booking-details">
+                      <div><dt>Email</dt><dd>{record.userId?.email || 'No email'}</dd></div>
+                      {record.userId?.uid && <div><dt>Customer UID</dt><dd>{record.userId.uid}</dd></div>}
+                      {record.salonId?.ownerId?.uid && <div><dt>Owner UID</dt><dd>{record.salonId.ownerId.uid}</dd></div>}
+                      <div><dt>Services</dt><dd>{(Array.isArray(record.services) ? record.services : []).map((service) => service.name).join(', ') || 'Not recorded'}</dd></div>
+                      {record.appointmentDate && <div><dt>Appointment</dt><dd>{formatAppointmentDate(record.appointmentDate)}</dd></div>}
+                      {record.paymentMethod === 'upi_manual' && <>
+                        <div><dt>UPI advance</dt><dd>{money(record.paymentAmount)}</dd></div>
+                        <div><dt>Platform payee</dt><dd>{record.upiPayeeName || 'Not recorded'}</dd></div>
+                        <div><dt>UPI reference</dt><dd>{record.upiReference || 'Not submitted'}</dd></div>
+                      </>}
+                      <div><dt>Services payable at salon</dt><dd>{money(record.total)}</dd></div>
+                      <div><dt>Booked</dt><dd>{new Date(record.createdAt).toLocaleString()}</dd></div>
+                      <div><dt>Service started</dt><dd>{formatServiceTimestamp(record.startedAt) || '—'}</dd></div>
+                      <div><dt>Service ended</dt><dd>{formatServiceTimestamp(record.completedAt) || (record.status === 'in_service' ? 'In progress' : '—')}</dd></div>
+                      <div><dt>Booking type</dt><dd>{record.priority === 'express' ? 'Express' : 'Standard'}</dd></div>
+                    </dl>
+                  </div>
+                  <div className="admin-record-badges"><span className={`status-pill status-${record.status || 'unknown'}`}>{bookingStatusLabel(record.status)}</span><span className="status-pill">{paymentStatusLabel(record.paymentStatus, record.status)}</span></div>
+                </div>
+                <div className="admin-record-actions"><span className="admin-booking-amount">{record.status === 'cancelled' ? `${money(record.paymentAmount)} advance payment cancelled · services ${money(record.total)}` : record.paymentStatus === 'paid' ? `${money(record.paymentAmount)} advance payment received · services ${money(record.total)}` : `${money(record.paymentAmount)} advance payment pending · services ${money(record.total)}`}</span>{record.paymentMethod === 'upi_manual' && record.status === 'pending_payment' && <><button className="button button-primary button-small" onClick={() => confirmUpiPayment(record)}>Confirm payment &amp; slot</button>{record.upiReference && <button className="button button-soft button-small" onClick={() => rejectUpiPayment(record)}>Reject reference</button>}</>}{record.status === 'waiting' && <button className="button button-primary button-small" onClick={() => updateBookingStatus(record, 'in_service')}>Start service</button>}{record.status === 'in_service' && <button className="button button-soft button-small" onClick={() => updateBookingStatus(record, 'completed')}>Complete service</button>}</div>
               </>}
             </article>
           );
@@ -2508,6 +2785,9 @@ function App() {
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   const [report, setReport] = useState(null);
+  const [adminDashboardTab, setAdminDashboardTab] = useState('dashboard');
+  const [activeBookingsPromptOpen, setActiveBookingsPromptOpen] = useState(false);
+  const [activeBookingsPromptCount, setActiveBookingsPromptCount] = useState(0);
   const [period, setPeriod] = useState('month');
   const [reportSalon, setReportSalon] = useState('');
   const [reportCustomer, setReportCustomer] = useState('');
@@ -2516,6 +2796,7 @@ function App() {
   const [adminSalons, setAdminSalons] = useState([]);
   const [adminCustomers, setAdminCustomers] = useState([]);
   const [ownerSalons, setOwnerSalons] = useState([]);
+  const [serverClockOffsetMs, setServerClockOffsetMs] = useState(0);
   const [salonOpenUpdates, setSalonOpenUpdates] = useState({});
   const [ownerSalonsLoaded, setOwnerSalonsLoaded] = useState(false);
   const [ownerSalonId, setOwnerSalonId] = useState('');
@@ -2534,6 +2815,8 @@ function App() {
     serviceName: 'Hair Cut', serviceCategory: 'Haircut', servicePrice: '299', serviceDuration: '30',
   });
   const bookingWaits = useRef(new Map());
+  const activeBookingsPromptDismissedRef = useRef(false);
+  const activeBookingsPromptUserIdRef = useRef('');
   const salonRequestIdRef = useRef(0);
   const bookingTriggerRef = useRef(null);
   const bookingCloseRef = useRef(null);
@@ -2679,6 +2962,7 @@ function App() {
       const result = await api(`/api/salons?${params.toString()}`);
       if (requestId !== salonRequestIdRef.current) return;
       setSalons(result.salons);
+      if (Number.isFinite(result.serverClockOffsetMs)) setServerClockOffsetMs(result.serverClockOffsetMs);
       const requestedSalonId = requestedSalonIdRef.current;
       let linkedSalon = requestedSalonId && result.salons.find((salon) => salon.id === requestedSalonId);
       if (requestedSalonId && !linkedSalon) {
@@ -2748,6 +3032,21 @@ function App() {
     if (!user) return;
     try {
       const result = await api('/api/bookings/my-bookings');
+      if (Number.isFinite(result.serverClockOffsetMs)) setServerClockOffsetMs(result.serverClockOffsetMs);
+      if (activeBookingsPromptUserIdRef.current !== user.id) {
+        activeBookingsPromptUserIdRef.current = user.id;
+        activeBookingsPromptDismissedRef.current = false;
+      }
+      const activeBookingCount = ['user', 'customer'].includes(user.role)
+        ? result.bookings.filter((booking) => ['pending_payment', 'waiting', 'in_service'].includes(booking.status)).length
+        : 0;
+      setActiveBookingsPromptCount(activeBookingCount);
+      if (activeBookingCount < 2) {
+        activeBookingsPromptDismissedRef.current = false;
+        setActiveBookingsPromptOpen(false);
+      } else if (!activeBookingsPromptDismissedRef.current) {
+        setActiveBookingsPromptOpen(true);
+      }
       for (const booking of result.bookings) {
         const previousWait = bookingWaits.current.get(booking.id);
         const currentWait = booking.estimatedWaitMinutes;
@@ -2800,6 +3099,7 @@ function App() {
     try {
       const result = await api(`/api/bookings/owner/${ownerSalonId}/queue`);
       setQueue(result.queue);
+      if (Number.isFinite(result.serverClockOffsetMs)) setServerClockOffsetMs(result.serverClockOffsetMs);
       setBlockedCustomers(Array.isArray(result.blockedCustomers) ? result.blockedCustomers : []);
       setOwnerBookingHistory(Array.isArray(result.bookings) ? result.bookings : []);
       setOwnerAccountUid(result.accountUid || '');
@@ -2967,6 +3267,14 @@ function App() {
       setAuthOpen(true);
       return;
     }
+    const activeBookingCount = bookings.filter((booking) => ['pending_payment', 'waiting', 'in_service'].includes(booking.status)).length;
+    if (['user', 'customer'].includes(user.role) && activeBookingCount >= 2) {
+      activeBookingsPromptDismissedRef.current = false;
+      setActiveBookingsPromptCount(activeBookingCount);
+      setActiveBookingsPromptOpen(true);
+      setError('');
+      return;
+    }
     if (!selectedSalon || !selectedServices.length) {
       notify('Choose at least one service to continue.');
       return;
@@ -2994,7 +3302,14 @@ function App() {
       setUpiPayment({ booking: result.booking, payment: result.payment });
       await loadBookings();
     } catch (requestError) {
-      setError(requestError.message);
+      if (/at most 2 active bookings/i.test(requestError.message)) {
+        activeBookingsPromptDismissedRef.current = false;
+        setActiveBookingsPromptCount(Math.max(2, activeBookingCount));
+        setActiveBookingsPromptOpen(true);
+        setError('');
+      } else {
+        setError(requestError.message);
+      }
     } finally {
       setBusy(false);
     }
@@ -3003,6 +3318,13 @@ function App() {
   const requestBooking = () => {
     if (!user) {
       bookNow();
+      return;
+    }
+    const activeBookingCount = bookings.filter((booking) => ['pending_payment', 'waiting', 'in_service'].includes(booking.status)).length;
+    if (['user', 'customer'].includes(user.role) && activeBookingCount >= 2) {
+      activeBookingsPromptDismissedRef.current = false;
+      setActiveBookingsPromptCount(activeBookingCount);
+      setActiveBookingsPromptOpen(true);
       return;
     }
     setNonRefundableNoticeOpen(true);
@@ -3014,7 +3336,7 @@ function App() {
       body: JSON.stringify({ upiReference }),
     });
     setUpiPayment((current) => current && current.booking.id === bookingId
-      ? { ...current, booking: { ...current.booking, upiReference } }
+      ? { ...current, booking: { ...current.booking, ...result.booking, upiReference } }
       : current);
     await loadBookings();
     return result;
@@ -3040,9 +3362,51 @@ function App() {
       notify(result.message);
       await loadBookings();
       await loadSalons();
+      return true;
     } catch (requestError) {
       setError(requestError.message);
+      notify(requestError.message);
+      return false;
     }
+  };
+
+  const cancelAllEligibleBookings = async () => {
+    const candidates = bookings.filter(canCustomerCancelBooking);
+    if (!candidates.length) {
+      return 'No bookings can be cancelled right now. In-progress services and bookings awaiting payment review or refund support are protected.';
+    }
+
+    const results = await Promise.all(candidates.map(async (booking) => {
+      try {
+        const result = await api(`/api/bookings/${booking.id || booking._id}/cancel`, { method: 'POST' });
+        return { booking, result };
+      } catch (requestError) {
+        return { booking, error: requestError.message };
+      }
+    }));
+
+    const successful = results.filter((result) => result.result);
+    const failures = results.filter((result) => result.error);
+    const creditsReturned = successful.reduce(
+      (total, result) => total + (Number(result.result.walletCreditReturned) || 0),
+      0
+    );
+    if (creditsReturned) {
+      setUser((current) => current && ({
+        ...current,
+        walletCredits: (current.walletCredits || 0) + creditsReturned,
+      }));
+    }
+
+    await Promise.all([loadBookings(), loadSalons()]);
+    if (!failures.length) return '';
+
+    const failureDetails = failures.map(({ booking, error: reason }) =>
+      `${booking.salonId?.name || booking.salonSnapshot?.name || 'Salon'}: ${reason}`
+    ).join(' ');
+    const message = `Cancelled ${successful.length} booking${successful.length === 1 ? '' : 's'}. ${failureDetails}`;
+    notify(message);
+    return message;
   };
 
   const signOut = async () => {
@@ -3144,7 +3508,7 @@ function App() {
     if (serviceCategory) params.set('serviceCategory', serviceCategory);
     const path = user?.role === 'admin' ? '/api/admin/reports.csv' : '/api/bookings/owner/report.csv';
     try {
-      const response = await fetch(`${API_BASE}${path}?${params}`, { credentials: 'include' });
+      const response = await fetchApiResponse(`${API_BASE}${path}?${params}`, { credentials: 'include' });
       if (!response.ok) {
         const result = await response.json();
         throw new Error(result.message || 'Could not download report.');
@@ -3300,7 +3664,7 @@ function App() {
 
       <main id="home">
         {page === 'orders' && user ? (
-          <OrdersHistoryPage key={`${user.id}-${user.role}`} user={user} onBack={() => setPage('home')} />
+          <OrdersHistoryPage key={`${user.id}-${user.role}`} user={user} serverClockOffsetMs={serverClockOffsetMs} onClockSync={setServerClockOffsetMs} onBack={() => setPage('home')} onCancelBooking={cancelBooking} />
         ) : page === 'profile' && user ? (
           user.role === 'owner' ? (
             <SalonProfilePage
@@ -3317,6 +3681,8 @@ function App() {
               key={user.id}
               user={user}
               bookings={bookings}
+              serverClockOffsetMs={serverClockOffsetMs}
+              onClockSync={setServerClockOffsetMs}
               onUserUpdated={setUser}
               onBack={() => setPage('home')}
               onSignOut={signOut}
@@ -3554,7 +3920,7 @@ function App() {
                 </section>}
                 {queueList.visibleItems.map((booking) => <div className="queue-row" key={booking.id}>
                   <span className="queue-number">{booking.status === 'in_service' ? '✂' : `#${booking.queuePosition}`}</span>
-                  <div className="queue-customer"><strong>{booking.user?.name || 'Customer'}</strong><small>{booking.services.map((service) => service.name).join(' + ')} · {booking.priority}</small>{booking.user?.contactPhone && <a className="queue-phone" href={`tel:${booking.user.contactPhone}`}>☎ {booking.user.contactPhone}</a>}</div>
+                  <div className="queue-customer"><strong>{booking.user?.name || 'Customer'}</strong><small>{booking.services.map((service) => service.name).join(' + ')} · {booking.priority}</small>{booking.user?.contactPhone && <a className="queue-phone" href={`tel:${booking.user.contactPhone}`}>☎ {booking.user.contactPhone}</a>}{booking.status === 'in_service' && <ServiceCountdown booking={booking} serverClockOffsetMs={serverClockOffsetMs} />}</div>
                   <button className="button button-soft button-small" onClick={() => setMessageBookingId((current) => current === booking.id ? '' : booking.id)}>Message</button>
                   {booking.status === 'waiting' && <>
                     <button className="button button-primary button-small" onClick={() => setQueueStatus(booking.id, 'in_service')}>Start</button>
@@ -3586,7 +3952,7 @@ function App() {
               <div className="panel-title-row"><div><h3>Booking history</h3>{ownerAccountUid && <span className="fine-print">Your UID: {ownerAccountUid}</span>}</div></div>
               {!ownerBookingHistory.length && <p className="muted">No booking history for this salon yet.</p>}
               {ownerHistoryList.visibleItems.map((booking) => <article className="owner-booking-history-row" key={booking._id}>
-                <div><strong>{booking.userId?.name || 'Customer'} · {booking.services.map((service) => service.name).join(', ')}</strong><small>{booking.userId?.uid ? `Customer UID: ${booking.userId.uid} · ` : ''}{booking.appointmentDate ? `Appointment: ${formatAppointmentDate(booking.appointmentDate)} · ` : ''}Booked: {new Date(booking.createdAt).toLocaleString()}</small>{booking.status === 'rejected' && booking.rejectionReason && <small>Rejection reason: {booking.rejectionReason}</small>}{booking.rejectionFeedback && <small>Customer feedback: {booking.rejectionFeedback}</small>}{booking.status === 'rejected' && !booking.rejectionEmailSentAt && booking.userId?.email && <button className="button button-soft button-small" onClick={() => retryRejectionEmail(booking._id)}>Retry rejection email</button>}{booking.userId?._id && <button className="button button-soft button-small owner-history-block-button" onClick={() => setCustomerBlocked(ownerSalonId, booking.userId._id, !booking.customerBlocked)}>{booking.customerBlocked ? 'Unblock customer' : 'Block customer'}</button>}</div>
+                <div><strong>{booking.userId?.name || 'Customer'} · {booking.services.map((service) => service.name).join(', ')}</strong><small>{booking.userId?.uid ? `Customer UID: ${booking.userId.uid} · ` : ''}{booking.appointmentDate ? `Appointment: ${formatAppointmentDate(booking.appointmentDate)} · ` : ''}Booked: {new Date(booking.createdAt).toLocaleString()}</small><ServiceTimeSummary booking={booking} />{booking.status === 'rejected' && booking.rejectionReason && <small>Rejection reason: {booking.rejectionReason}</small>}{booking.rejectionFeedback && <small>Customer feedback: {booking.rejectionFeedback}</small>}{booking.status === 'rejected' && !booking.rejectionEmailSentAt && booking.userId?.email && <button className="button button-soft button-small" onClick={() => retryRejectionEmail(booking._id)}>Retry rejection email</button>}{booking.userId?._id && <button className="button button-soft button-small owner-history-block-button" onClick={() => setCustomerBlocked(ownerSalonId, booking.userId._id, !booking.customerBlocked)}>{booking.customerBlocked ? 'Unblock customer' : 'Block customer'}</button>}</div>
                 <span className={`status-pill status-${booking.status}`}>{bookingStatusLabel(booking.status)}</span>
               </article>)}
               <LoadMoreButton shown={ownerHistoryList.visibleItems.length} total={ownerBookingHistory.length} onClick={ownerHistoryList.loadMore} label="bookings" />
@@ -3598,14 +3964,22 @@ function App() {
           <section className="dashboard-section" id="dashboard">
             <div className="admin-dashboard-heading">
               <BackArrowButton onClick={() => setPage('home')} className="section-back-navigation" />
-              <strong className="owner-studio-title">Admin dashboard</strong>
+              <strong className="owner-studio-title">{adminDashboardTab === 'dashboard' ? 'Admin dashboard' : 'Management dashboard'}</strong>
               <span aria-hidden="true" />
             </div>
+            <div className="segmented admin-dashboard-tabs" role="tablist" aria-label="Admin dashboards">
+              <button id="admin-dashboard-tab" type="button" role="tab" aria-selected={adminDashboardTab === 'dashboard'} aria-controls="admin-dashboard-panel" className={adminDashboardTab === 'dashboard' ? 'active' : ''} onClick={() => setAdminDashboardTab('dashboard')}>Admin dashboard</button>
+              <button id="management-dashboard-tab" type="button" role="tab" aria-selected={adminDashboardTab === 'management'} aria-controls="management-dashboard-panel" className={adminDashboardTab === 'management' ? 'active' : ''} onClick={() => setAdminDashboardTab('management')}>Management dashboard</button>
+            </div>
+            <div id="admin-dashboard-panel" role="tabpanel" aria-labelledby="admin-dashboard-tab" hidden={adminDashboardTab !== 'dashboard'}>
             <div className="report-controls admin-dashboard-controls"><select value={period} onChange={(event) => setPeriod(event.target.value)}><option value="day">Today</option><option value="week">This week</option><option value="month">This month</option><option value="year">This year</option></select><SearchableAdminSelect label="Salon" showLabel={false} value={reportSalon} placeholder="All salons" options={[{ value: '', label: 'All salons' }, ...reportSalons.map((salon) => ({ value: salon.id, label: `${salon.name || 'Salon'}${salon.ownerName ? ` · ${salon.ownerName}` : ''}${salon.ownerEmail ? ` · ${salon.ownerEmail}` : ''}${salon.ownerUid ? ` · ${salon.ownerUid}` : ''}` }))]} onChange={setReportSalon} /><SearchableAdminSelect label="Customer" showLabel={false} value={reportCustomer} placeholder="All customers" options={[{ value: '', label: 'All customers' }, ...adminCustomers.map((customer) => ({ value: customer.id, label: `${customer.name || 'Customer'}${customer.email ? ` · ${customer.email}` : ''}${customer.uid ? ` · ${customer.uid}` : ''}` }))]} onChange={setReportCustomer} /><select value={serviceCategory} onChange={(event) => setServiceCategory(event.target.value)}><option value="">All services</option>{reportCategories.map((category) => <option value={category} key={category}>{category}</option>)}</select><button className="button button-soft" onClick={clearReportFilters} disabled={!reportSalon && !reportCustomer && !serviceCategory}>Clear filters</button><button className="button button-soft" onClick={downloadReport}>↓ Export CSV</button></div>
             <ReportCards report={report} />
             <div className="panel-box report-breakdown"><h3>Service performance</h3>{report?.services?.length ? reportServiceList.visibleItems.map((service) => <div className="report-row" key={service.category}><span>{service.category}<small>{service.orders} services booked</small></span><strong>{money(service.revenue)}</strong></div>) : <p className="muted">No paid bookings in this period yet.</p>}<LoadMoreButton shown={reportServiceList.visibleItems.length} total={(report?.services || []).length} onClick={reportServiceList.loadMore} label="service categories" /></div>
             <div className="panel-box approvals"><div className="panel-title-row"><h3>Salon applications</h3><span className="result-count">{pendingSalons.length} pending</span></div>{!pendingSalons.length && <p className="muted">All caught up.</p>}{pendingSalonList.visibleItems.map((salon) => <div className="owner-salon-row" key={salon.id}><div><strong>{salon.name}</strong><small>{salon.address}, {salon.city} · {salon.ownerId?.name || 'Owner'}{salon.ownerId?.uid ? ` · UID: ${salon.ownerId.uid}` : ''}</small></div><div className="approval-actions"><button className="button button-primary button-small" onClick={() => setSalonApproval(salon.id, true)}>Approve</button><button className="button button-soft button-small" onClick={() => setSalonApproval(salon.id, false)}>Keep pending</button></div></div>)}<LoadMoreButton shown={pendingSalonList.visibleItems.length} total={pendingSalons.length} onClick={pendingSalonList.loadMore} label="salon applications" /></div>
+            </div>
+            <div id="management-dashboard-panel" className="admin-dashboard-management" role="tabpanel" aria-labelledby="management-dashboard-tab" hidden={adminDashboardTab !== 'management'}>
             <AdminManagement
+              key={adminDashboardTab}
               customers={adminCustomers}
               salons={adminSalons}
               onConfirm={requestConfirmation}
@@ -3620,6 +3994,7 @@ function App() {
                   .catch((requestError) => setError(requestError.message));
               }}
             />
+            </div>
           </section>
         )}
 
@@ -3640,6 +4015,20 @@ function App() {
         <span className="footer-copyright">© {new Date().getFullYear()} SalonFlow</span>
       </footer>
       {toast && <div className="toast" role="status">{toast}</div>}
+      {activeBookingsPromptOpen && <ActiveBookingsPrompt
+        count={Math.max(activeBookingsPromptCount, bookings.filter((booking) => ['pending_payment', 'waiting', 'in_service'].includes(booking.status)).length)}
+        cancelableCount={bookings.filter(canCustomerCancelBooking).length}
+        onCancelAll={cancelAllEligibleBookings}
+        onDismiss={() => {
+          activeBookingsPromptDismissedRef.current = true;
+          setActiveBookingsPromptOpen(false);
+        }}
+        onViewBookings={() => {
+          activeBookingsPromptDismissedRef.current = true;
+          setActiveBookingsPromptOpen(false);
+          setPage('orders');
+        }}
+      />}
       <ConfirmationDialog confirmation={confirmation} onResolve={resolveConfirmation} />
       {salonQr && <SalonQrDialog salon={salonQr} onClose={() => setSalonQr(null)} />}
       {contactAdminOpen && user && <ContactAdminDialog user={user} onClose={() => setContactAdminOpen(false)} onSent={(message) => {
