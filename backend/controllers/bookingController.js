@@ -175,9 +175,15 @@ const submitUpiReference = async (req, res, next) => {
         _id: req.params.id,
         userId: req.user.id,
         paymentMethod: 'upi_manual',
-        paymentStatus: 'pending',
-        status: 'pending_payment',
         upiReference: { $exists: false },
+        $or: [
+          { paymentStatus: 'pending', status: 'pending_payment' },
+          {
+            paymentStatus: 'paid',
+            status: { $in: ['waiting', 'in_service', 'completed'] },
+            paymentVerifiedAt: { $exists: true },
+          },
+        ],
       },
       { $set: { upiReference } },
       { new: true, runValidators: true }
@@ -187,7 +193,9 @@ const submitUpiReference = async (req, res, next) => {
     }
     return res.json({
       success: true,
-      message: 'Reference submitted. Your booking stays pending until an administrator verifies the payment in the bank account.',
+      message: booking.paymentStatus === 'paid'
+        ? 'Reference added to the booking. The administrator had already confirmed the payment.'
+        : 'Reference submitted. Your booking stays pending until an administrator verifies the payment in the bank account.',
       booking,
     });
   } catch (error) {
@@ -328,6 +336,7 @@ const getUserBookings = async (req, res, next) => {
     return res.json({
       success: true,
       bookings: result,
+      serverTime: new Date().toISOString(),
       page,
       pages: Math.max(1, Math.ceil(total / limit)),
       total,
@@ -452,6 +461,7 @@ const getBookingHistory = async (req, res, next) => {
         ...(isCustomer ? { userUid: req.user.uid } : {}),
         ...(req.user.role === 'owner' ? { ownerUid: req.user.uid } : {}),
       })),
+      serverTime: new Date().toISOString(),
       page,
       pages: Math.max(1, Math.ceil(total / limit)),
       total,
@@ -482,6 +492,7 @@ const getSalonQueue = async (req, res, next) => {
     return res.json({
       success: true,
       salon,
+      serverTime: new Date().toISOString(),
       blockedCustomers: blockedCustomers.map((customer) => ({
         ...customer,
         id: customer._id.toString(),
