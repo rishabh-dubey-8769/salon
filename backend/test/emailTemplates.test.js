@@ -1,10 +1,10 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const nodemailer = require('nodemailer');
 const Otp = require('../models/otp');
 const { issueOtp } = require('../utils/otp');
 const sendMessageEmail = require('../utils/sendMessageEmail');
 const sendBookingRejectionEmail = require('../utils/sendBookingRejectionEmail');
+const sendBrevoEmail = require('../utils/sendBrevoEmail');
 const {
   buildOtpEmail,
   buildMessageEmail,
@@ -30,43 +30,46 @@ test('registration and password-reset OTP emails have clear, distinct subjects a
 });
 
 test('OTP delivery sends the matching rich email template for sign-up and password reset', async () => {
-  const originalCreateTransport = nodemailer.createTransport;
+  const originalFetch = global.fetch;
   const originalFind = Otp.findOne;
   const originalUpdate = Otp.findOneAndUpdate;
   const originalDelete = Otp.deleteOne;
   const originalSecret = process.env.OTP_SECRET;
-  const originalGmailUser = process.env.GMAIL_USER;
-  const originalGmailPassword = process.env.GMAIL_APP_PASSWORD;
+  const originalBrevoApiKey = process.env.BREVO_API_KEY;
+  const originalEmailFrom = process.env.EMAIL_FROM;
   const sentEmails = [];
   process.env.OTP_SECRET = 'test-secret-for-email-template-validation';
-  process.env.GMAIL_USER = 'test@example.com';
-  process.env.GMAIL_APP_PASSWORD = 'mock-password';
+  process.env.BREVO_API_KEY = 'test-brevo-key';
+  process.env.EMAIL_FROM = 'verified@example.com';
   Otp.findOne = async () => null;
   Otp.findOneAndUpdate = async () => ({});
   Otp.deleteOne = async () => ({ deletedCount: 0 });
-  nodemailer.createTransport = () => ({
-    sendMail: async (email) => sentEmails.push(email),
-  });
+  global.fetch = async (url, options) => {
+    sentEmails.push({ url, options, payload: JSON.parse(options.body) });
+    return { ok: true, status: 201 };
+  };
   try {
     await issueOtp('signup@example.com', 'register');
     await issueOtp('reset@example.com', 'reset_password');
-    assert.equal(sentEmails[0].subject, 'SalonFlow | Your email verification code');
-    assert.equal(sentEmails[1].subject, 'SalonFlow | Your password reset code');
-    assert.match(sentEmails[0].html, /Your sign-up, beautifully simple\./);
-    assert.match(sentEmails[1].html, /A fresh start, securely\./);
-    assert.match(sentEmails[0].from.name, /SalonFlow/);
-    assert.ok(sentEmails.every((email) => email.text && email.html));
+    assert.equal(sentEmails[0].url, 'https://api.brevo.com/v3/smtp/email');
+    assert.equal(sentEmails[0].options.headers['api-key'], 'test-brevo-key');
+    assert.equal(sentEmails[0].payload.sender.email, 'verified@example.com');
+    assert.equal(sentEmails[0].payload.subject, 'SalonFlow | Your email verification code');
+    assert.equal(sentEmails[1].payload.subject, 'SalonFlow | Your password reset code');
+    assert.match(sentEmails[0].payload.htmlContent, /Your sign-up, beautifully simple\./);
+    assert.match(sentEmails[1].payload.htmlContent, /A fresh start, securely\./);
+    assert.ok(sentEmails.every((email) => email.payload.textContent && email.payload.htmlContent));
   } finally {
-    nodemailer.createTransport = originalCreateTransport;
+    global.fetch = originalFetch;
     Otp.findOne = originalFind;
     Otp.findOneAndUpdate = originalUpdate;
     Otp.deleteOne = originalDelete;
     if (originalSecret === undefined) delete process.env.OTP_SECRET;
     else process.env.OTP_SECRET = originalSecret;
-    if (originalGmailUser === undefined) delete process.env.GMAIL_USER;
-    else process.env.GMAIL_USER = originalGmailUser;
-    if (originalGmailPassword === undefined) delete process.env.GMAIL_APP_PASSWORD;
-    else process.env.GMAIL_APP_PASSWORD = originalGmailPassword;
+    if (originalBrevoApiKey === undefined) delete process.env.BREVO_API_KEY;
+    else process.env.BREVO_API_KEY = originalBrevoApiKey;
+    if (originalEmailFrom === undefined) delete process.env.EMAIL_FROM;
+    else process.env.EMAIL_FROM = originalEmailFrom;
   }
 });
 
@@ -94,16 +97,51 @@ test('email templates escape user-provided content and include readable text alt
   assert.match(rejection.text, /https:\/\/example.com\/feedback\?token=abc&source=email/);
 });
 
+test('Brevo email delivery fails explicitly when credentials are missing or the API rejects a request', async () => {
+  const originalFetch = global.fetch;
+  const originalBrevoApiKey = process.env.BREVO_API_KEY;
+  const originalEmailFrom = process.env.EMAIL_FROM;
+  let fetchCalls = 0;
+  global.fetch = async () => {
+    fetchCalls += 1;
+    return { ok: false, status: 401, text: async () => 'Invalid API key' };
+  };
+
+  try {
+    delete process.env.BREVO_API_KEY;
+    process.env.EMAIL_FROM = 'verified@example.com';
+    await assert.rejects(
+      sendBrevoEmail({ to: 'customer@example.com', subject: 'Test', text: 'Test' }),
+      /Set BREVO_API_KEY and a verified EMAIL_FROM/
+    );
+    assert.equal(fetchCalls, 0);
+
+    process.env.BREVO_API_KEY = 'test-brevo-key';
+    await assert.rejects(
+      sendBrevoEmail({ to: 'customer@example.com', subject: 'Test', text: 'Test' }),
+      /Brevo transactional email request failed \(401\)/
+    );
+    assert.equal(fetchCalls, 1);
+  } finally {
+    global.fetch = originalFetch;
+    if (originalBrevoApiKey === undefined) delete process.env.BREVO_API_KEY;
+    else process.env.BREVO_API_KEY = originalBrevoApiKey;
+    if (originalEmailFrom === undefined) delete process.env.EMAIL_FROM;
+    else process.env.EMAIL_FROM = originalEmailFrom;
+  }
+});
+
 test('direct messages and booking notices send branded HTML and text email alternatives', async () => {
-  const originalCreateTransport = nodemailer.createTransport;
-  const originalGmailUser = process.env.GMAIL_USER;
-  const originalGmailPassword = process.env.GMAIL_APP_PASSWORD;
+  const originalFetch = global.fetch;
+  const originalBrevoApiKey = process.env.BREVO_API_KEY;
+  const originalEmailFrom = process.env.EMAIL_FROM;
   const sentEmails = [];
-  process.env.GMAIL_USER = 'test@example.com';
-  process.env.GMAIL_APP_PASSWORD = 'mock-password';
-  nodemailer.createTransport = () => ({
-    sendMail: async (email) => sentEmails.push(email),
-  });
+  process.env.BREVO_API_KEY = 'test-brevo-key';
+  process.env.EMAIL_FROM = 'verified@example.com';
+  global.fetch = async (url, options) => {
+    sentEmails.push(JSON.parse(options.body));
+    return { ok: true, status: 201 };
+  };
   try {
     await sendMessageEmail({
       to: 'owner@example.com',
@@ -119,15 +157,16 @@ test('direct messages and booking notices send branded HTML and text email alter
       feedbackUrl: 'https://example.com/feedback',
     });
     assert.match(sentEmails[0].subject, /New message about Studio One/);
-    assert.match(sentEmails[0].html, /A personal message/);
+    assert.match(sentEmails[0].htmlContent, /A personal message/);
     assert.match(sentEmails[1].subject, /update about your Studio One booking/i);
-    assert.match(sentEmails[1].html, /Share your feedback/);
-    assert.ok(sentEmails.every((email) => email.text && email.html && email.from.name === 'SalonFlow'));
+    assert.match(sentEmails[1].htmlContent, /Share your feedback/);
+    assert.ok(sentEmails.every((email) => email.textContent && email.htmlContent && email.sender.name === 'SalonFlow'));
+    assert.deepEqual(sentEmails[0].replyTo, { email: 'customer@example.com' });
   } finally {
-    nodemailer.createTransport = originalCreateTransport;
-    if (originalGmailUser === undefined) delete process.env.GMAIL_USER;
-    else process.env.GMAIL_USER = originalGmailUser;
-    if (originalGmailPassword === undefined) delete process.env.GMAIL_APP_PASSWORD;
-    else process.env.GMAIL_APP_PASSWORD = originalGmailPassword;
+    global.fetch = originalFetch;
+    if (originalBrevoApiKey === undefined) delete process.env.BREVO_API_KEY;
+    else process.env.BREVO_API_KEY = originalBrevoApiKey;
+    if (originalEmailFrom === undefined) delete process.env.EMAIL_FROM;
+    else process.env.EMAIL_FROM = originalEmailFrom;
   }
 });
