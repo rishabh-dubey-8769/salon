@@ -4,6 +4,7 @@ const Booking = require('../models/booking');
 const Rating = require('../models/rating');
 const User = require('../models/user');
 const distanceKm = require('../utils/distance');
+const { isAppointmentDateDue } = require('../utils/appointmentDate');
 const isNumericInput = (value) =>
   (typeof value === 'number' || (typeof value === 'string' && value.trim() !== '')) &&
   Number.isFinite(Number(value));
@@ -21,6 +22,19 @@ const areValidSalonPhotos = (photos, logo) => {
   if (photos === undefined) return true;
   if (!Array.isArray(photos) || photos.length > 5 || !photos.every(isValidImageDataUrl)) return false;
   return [logo, ...photos].reduce((total, image) => total + (typeof image === 'string' ? image.length : 0), 0) <= 1_400_000;
+};
+const summarizeActiveServices = (bookings, now = new Date()) => {
+  const activeServiceBySalon = new Map();
+  for (const booking of bookings) {
+    const salonId = booking.salonId.toString();
+    if (activeServiceBySalon.has(salonId) ||
+      !isAppointmentDateDue(booking.appointmentDate, booking.appointmentTimeZone || 'UTC', now)) continue;
+    activeServiceBySalon.set(salonId, {
+      startedAt: booking.startedAt,
+      services: booking.services.map(({ name, durationMinutes }) => ({ name, durationMinutes })),
+    });
+  }
+  return activeServiceBySalon;
 };
 
 const getSalons = async (req, res, next) => {
@@ -125,6 +139,13 @@ const getSalons = async (req, res, next) => {
         { $group: { _id: '$salonId', average: { $avg: '$value' }, count: { $sum: 1 } } },
       ]),
     ];
+    const activeBookings = ids.length
+      ? await Booking.find({ salonId: { $in: ids }, status: 'in_service' })
+        .select('salonId startedAt services appointmentDate appointmentTimeZone')
+        .sort({ startedAt: 1 })
+        .lean()
+      : [];
+    const activeServiceBySalon = summarizeActiveServices(activeBookings, now);
     const ratingsById = new Map(ratingRows.map((row) => [row._id.toString(), row]));
     const latitude = Number(lat);
     const longitude = Number(lng);
@@ -152,6 +173,7 @@ const getSalons = async (req, res, next) => {
         ratingCount: ratingStats.count,
         queueCount: stats.peopleWaiting,
         waitMinutes: Math.ceil(stats.estimatedMinutes),
+        activeService: activeServiceBySalon.get(salon._id.toString()) || null,
         distanceKm: hasLocation ? distanceKm(latitude, longitude, salon.lat, salon.lng) : null,
       };
     });
@@ -165,7 +187,7 @@ const getSalons = async (req, res, next) => {
     if (hasLocation) result.sort((left, right) => left.distanceKm - right.distanceKm);
     else result.sort((left, right) => right.rating - left.rating || left.name.localeCompare(right.name));
 
-    return res.json({ success: true, count: result.length, salons: result });
+    return res.json({ success: true, count: result.length, serverTime: new Date().toISOString(), salons: result });
   } catch (error) {
     return next(error);
   }
@@ -394,6 +416,7 @@ const setCustomerBlock = async (req, res, next) => {
 
 module.exports = {
   getSalons,
+  summarizeActiveServices,
   getSalonById,
   createSalon,
   updateMySalon,
