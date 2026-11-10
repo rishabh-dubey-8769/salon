@@ -1,8 +1,8 @@
 const crypto = require('crypto');
-const nodemailer = require('nodemailer');
 const twilio = require('twilio');
 const Otp = require('../models/otp');
 const { buildOtpEmail } = require('./emailTemplates');
+const sendBrevoEmail = require('./sendBrevoEmail');
 
 const createOtp = () => crypto.randomInt(100000, 1000000).toString();
 const hashOtp = (code) =>
@@ -28,17 +28,8 @@ const deliverOtp = async (contact, code, purpose) => {
 };
 
 const sendEmail = async (email, code, purpose) => {
-  const { GMAIL_USER, GMAIL_APP_PASSWORD, EMAIL_FROM } = process.env;
-  if (!GMAIL_USER || !GMAIL_APP_PASSWORD) {
-    throw new Error('Email OTP is not configured. Set GMAIL_USER and GMAIL_APP_PASSWORD.');
-  }
-  const transporter = nodemailer.createTransport({
-    service: 'gmail',
-    auth: { user: GMAIL_USER, pass: GMAIL_APP_PASSWORD },
-  });
   const emailContent = buildOtpEmail({ code, purpose });
-  await transporter.sendMail({
-    from: { name: 'SalonFlow', address: EMAIL_FROM || GMAIL_USER },
+  await sendBrevoEmail({
     to: email,
     ...emailContent,
   });
